@@ -1,8 +1,7 @@
 diff --git a/src/common/CMakeLists.txt b/src/common/CMakeLists.txt
-index 76c5019788..5d4f5eaaba 100644
 --- a/src/common/CMakeLists.txt
 +++ b/src/common/CMakeLists.txt
-@@ -84,6 +84,7 @@ add_library(
+@@ -87,6 +87,7 @@ add_library(
      overflow.h
      page_table.cpp
      page_table.h
@@ -10,117 +9,10 @@ index 76c5019788..5d4f5eaaba 100644
      param_package.cpp
      param_package.h
      parent_of_member.h
-diff --git a/src/common/paged_scalar.h b/src/common/paged_scalar.h
-new file mode 100644
-index 0000000000..1898dfb2e5
---- /dev/null
-+++ b/src/common/paged_scalar.h
-@@ -0,0 +1,58 @@
-+// SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
-+// SPDX-License-Identifier: GPL-3.0-or-later
-+
-+#pragma once
-+
-+#include <algorithm>
-+#include <cstring>
-+#include <limits>
-+#include <type_traits>
-+#include "common/common_types.h"
-+
-+namespace Common {
-+
-+// A translated pointer is valid only within its physical backing page, even when
-+// the guest GPU mapping uses a larger page. Never memcpy a scalar across it.
-+template <typename T, typename Translate>
-+[[nodiscard]] T ReadPagedScalar(u64 address, Translate&& translate) {
-+    static_assert(std::is_trivially_copyable_v<T>);
-+    constexpr u64 page_size = 0x1000;
-+    T value{};
-+    auto* bytes = reinterpret_cast<u8*>(&value);
-+    size_t remaining = sizeof(T);
-+    while (remaining != 0) {
-+        const size_t count = (std::min)(remaining, size_t{page_size - (address & (page_size - 1))});
-+        if (const auto* pointer = translate(address)) {
-+            std::memcpy(bytes, pointer, count);
-+        }
-+        remaining -= count;
-+        bytes += count;
-+        if (count > (std::numeric_limits<u64>::max)() - address) {
-+            break; // Do not wrap an invalid trailing range back to address zero.
-+        }
-+        address += count;
-+    }
-+    return value;
-+}
-+
-+template <typename T, typename Translate>
-+void WritePagedScalar(u64 address, T value, Translate&& translate) {
-+    static_assert(std::is_trivially_copyable_v<T>);
-+    constexpr u64 page_size = 0x1000;
-+    const auto* bytes = reinterpret_cast<const u8*>(&value);
-+    size_t remaining = sizeof(T);
-+    while (remaining != 0) {
-+        const size_t count = (std::min)(remaining, size_t{page_size - (address & (page_size - 1))});
-+        if (auto* pointer = translate(address)) {
-+            std::memcpy(pointer, bytes, count);
-+        }
-+        remaining -= count;
-+        bytes += count;
-+        if (count > (std::numeric_limits<u64>::max)() - address) {
-+            break;
-+        }
-+        address += count;
-+    }
-+}
-+
-+} // namespace Common
-diff --git a/src/core/device_memory_manager.inc b/src/core/device_memory_manager.inc
-index 5931fd0882..a71bf02d5e 100644
---- a/src/core/device_memory_manager.inc
-+++ b/src/core/device_memory_manager.inc
-@@ -18,6 +18,7 @@
- #include "common/alignment.h"
- #include "common/assert.h"
- #include "common/div_ceil.h"
-+#include "common/paged_scalar.h"
- #include "common/scope_exit.h"
- #include "common/settings.h"
- #include "core/device_memory.h"
-@@ -418,23 +419,17 @@ const T* DeviceMemoryManager<Traits>::GetPointer(DAddr address) const {
- template <typename Traits>
- template <typename T>
- void DeviceMemoryManager<Traits>::Write(DAddr address, T value) {
--    T* ptr = GetPointer<T>(address);
--    if (!ptr) [[unlikely]] {
--        return;
--    }
--    std::memcpy(ptr, &value, sizeof(T));
-+    Common::WritePagedScalar(address, value, [&](DAddr page_address) {
-+        return page_address < device_as_size ? GetPointer<u8>(page_address) : nullptr;
-+    });
- }
- 
- template <typename Traits>
- template <typename T>
- T DeviceMemoryManager<Traits>::Read(DAddr address) const {
--    const T* ptr = GetPointer<T>(address);
--    T result{};
--    if (!ptr) [[unlikely]] {
--        return result;
--    }
--    std::memcpy(&result, ptr, sizeof(T));
--    return result;
-+    return Common::ReadPagedScalar<T>(address, [&](DAddr page_address) {
-+        return page_address < device_as_size ? GetPointer<u8>(page_address) : nullptr;
-+    });
- }
- 
- template <typename Traits>
 diff --git a/src/video_core/memory_manager.cpp b/src/video_core/memory_manager.cpp
-index ae64372b9c..5633e73bbd 100644
 --- a/src/video_core/memory_manager.cpp
 +++ b/src/video_core/memory_manager.cpp
-@@ -9,6 +9,7 @@
+@@ -10,6 +10,7 @@
  #include "common/alignment.h"
  #include "common/assert.h"
  #include "common/logging.h"
@@ -128,7 +20,7 @@ index ae64372b9c..5633e73bbd 100644
  #include "core/core.h"
  #include "core/hle/kernel/k_page_table.h"
  #include "core/hle/kernel/k_process.h"
-@@ -279,36 +280,33 @@ T MemoryManager::Read(GPUVAddr addr) const {
+@@ -293,36 +294,33 @@ T MemoryManager::Read(GPUVAddr addr) const {
          }
      }
  
