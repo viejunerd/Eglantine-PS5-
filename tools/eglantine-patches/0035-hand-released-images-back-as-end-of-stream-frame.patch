@@ -1,16 +1,15 @@
 diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
-index 1a0e88d7a7..d8fa5b0bbe 100644
 --- a/src/core/hle/service/nx2_gsv.h
 +++ b/src/core/hle/service/nx2_gsv.h
-@@ -2504,6 +2504,7 @@ private:
+@@ -2595,6 +2595,7 @@
          u32 height;
          u64 pts;
          bool end;
-+        bool after_end; // no frame: an image released after the end of the stream, handed back
++        bool after_end{}; // Empty EOS frame from a released image; discard on flush.
      };
      struct Fence {
          u32 syncpoint;
-@@ -2635,26 +2636,26 @@ private:
+@@ -2732,29 +2733,33 @@
          u32 value;
          {
              std::scoped_lock lk{m_mutex};
@@ -18,69 +17,77 @@ index 1a0e88d7a7..d8fa5b0bbe 100644
 -            if (release_fence) {
 -                m_release_fences[image] = *release_fence;
 -            }
--            // After the end of a stream nothing fills an image again, so a release completes at
--            // once: its fence is the syncpoint's current value. Mario Kart World releases its
--            // images after a movie ends and waits for the returned fences; a fence for a frame
--            // that never comes hung the game on a black screen after its title movie.
+-            // Mario Kart World waits for returned images after a movie and acquires a frame for
+-            // each completed fence, so its released images need synthetic end-of-stream frames.
 -            static const bool release_now = [] {
 -                const char* env_value = std::getenv("EDEN_NX2_VDEC_EOS_RELEASE_NOW");
 -                return env_value != nullptr && env_value[0] != '0';
 -            }();
--            if (release_now && release_fence && m_stream_ended && m_inputs.empty() &&
++            // Mario Kart World already has a special EOS-drain path. For other titles a released
++            // image after EOS has no new decode to fill it: hand it back as an empty completed
++            // frame for command 213, instead of queuing a fence for work that cannot happen.
+             const bool drain_eos =
+                 system.GetApplicationProcessProgramID() == Settings::MarioKartWorldProgramId;
+-            if ((drain_eos || release_now) && release_fence && m_stream_ended && m_inputs.Empty() &&
 -                m_decoded.empty()) {
--                const u32 reached = static_cast<u32>(
-+            // After the end of a stream nothing fills a released image, so it comes straight back
-+            // as an empty end-of-stream frame: its fence is the syncpoint's current value and 213
-+            // has a frame for it. Mario Kart World releases its images after a movie ends and
-+            // waits for the returned fences (a fence for a frame that never comes hung it on a
-+            // black screen after its title movie). Hyrule Warriors' movie player re-acquires each
-+            // image it releases, waits that fence and asks 213 for the image's frame; an empty
-+            // reply (0x1c286f) froze the game on a movie's last frame. The image stays out of
-+            // m_free and uncounted, so later frames (the player keeps submitting empty
-+            // end-of-stream inputs) still fill images in the order their fences count.
-+            if (release_fence && m_stream_ended && m_inputs.empty() && m_decoded.empty()) {
-+                value = static_cast<u32>(
-                     system.Host1x().GetSyncpointManager().GetGuestSyncpointValue(m_syncpoint));
+-                const u32 reached =
+-                    drain_eos ? DrainFreeAsEndOfStream()
+-                              : static_cast<u32>(system.Host1x().GetSyncpointManager()
+-                                                     .GetGuestSyncpointValue(m_syncpoint));
 -                m_sync_base = reached;
 -                m_handed = 0;
 -                value = reached;
-+                m_outputs.push_back({image, m_out_width, m_out_height, 0, true, true});
-+                LOG_DEBUG(Service, "{} image {} released after the end of stream, handed back",
++            const bool finished = release_fence && m_stream_ended && m_inputs.Empty() &&
++                                  m_decoded.empty();
++            if (finished && !drain_eos) {
++                m_outputs.push_back(
++                    {image, m_last_output.width, m_last_output.height, 0, true, true});
++                value = static_cast<u32>(
++                    system.Host1x().GetSyncpointManager().GetGuestSyncpointValue(m_syncpoint));
++                LOG_DEBUG(Service, "{} image {} released after EOS, handed back as an empty frame",
 +                          GetServiceName(), image);
              } else {
+-                value = m_sync_base + ++m_handed;
 +                m_free.push_back(image);
 +                if (release_fence) {
 +                    m_release_fences[image] = *release_fence;
 +                }
-                 value = m_sync_base + ++m_handed;
++                if (finished && drain_eos) {
++                    const u32 reached = DrainFreeAsEndOfStream();
++                    m_sync_base = reached;
++                    m_handed = 0;
++                    value = reached;
++                } else {
++                    value = m_sync_base + ++m_handed;
++                }
              }
-         }
-@@ -2717,6 +2718,8 @@ private:
-         {
-             std::scoped_lock lk{m_mutex};
-             m_inputs.clear();
-+            // Images handed back after the end of the stream hold no frame for what follows.
+             if (Nx2VideoTraceEnabled()) {
+                 LOG_INFO(Service,
+@@ -2844,6 +2849,8 @@
+                          m_stream_ended, m_end_queued);
+             }
+             m_inputs.Clear();
++            // Synthetic EOS returns are not frames from the next stream.
 +            std::erase_if(m_outputs, [](const Output& output) { return output.after_end; });
              m_flush = true;
              m_stream_ended = false;
-             m_ready->room.store(true, std::memory_order_relaxed);
-@@ -2819,7 +2822,9 @@ private:
+             m_end_queued = false;
+@@ -2968,7 +2975,7 @@
                  const auto [width, height] = WriteImage(decoder.get(), image, frame, bytes);
                  lk.lock();
                  // Even an image written during a flush counts: the client waits for its value.
 -                m_outputs.push_back({image, width, height, frame.pts, frame.end});
 +                m_outputs.push_back({image, width, height, frame.pts, frame.end, false});
-+                m_out_width = width;
-+                m_out_height = height;
                  if (frame.end) {
                      m_stream_ended = true;
-                     m_ready->room.store(false, std::memory_order_relaxed);
-@@ -2991,6 +2996,8 @@ private:
-     std::string m_codec;
-     u32 m_width{};
-     u32 m_height{};
-+    u32 m_out_width{};  ///< Size of the last frame written
-+    u32 m_out_height{};
-     u32 m_handed{}; ///< Output images handed out (registered or released) so far
-     u64 m_frames_out{};
-     std::deque<Input> m_inputs;
+                     m_end_queued = false;
+@@ -3054,7 +3061,8 @@
+             const u32 image = m_free.front();
+             m_free.pop_front();
+             m_release_fences.erase(image);
+-            m_outputs.push_back({image, m_last_output.width, m_last_output.height, m_last_output.pts, true});
++            m_outputs.push_back(
++                {image, m_last_output.width, m_last_output.height, m_last_output.pts, true, true});
+             syncpoints.IncrementGuest(m_syncpoint);
+         }
+         return static_cast<u32>(syncpoints.GetGuestSyncpointValue(m_syncpoint));
