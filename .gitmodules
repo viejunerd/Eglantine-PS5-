@@ -1,3 +1,4 @@
 [submodule "Eglantine"]
 	path = Eglantine
 	url = https://github.com/zortos293/Lichii
+	branch = nx2
