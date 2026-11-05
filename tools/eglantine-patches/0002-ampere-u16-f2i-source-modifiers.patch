@@ -1,16 +1,24 @@
 diff --git a/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h b/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h
-index 81bd4b9e74..13f8f411a6 100644
 --- a/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h
 +++ b/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h
-@@ -1601,7 +1601,10 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32
+@@ -2153,17 +2153,18 @@
+                 (signed_half && (insn.Bits(24, 8) || (insn.words[3] & 0xc00001ffU))) ||
+                 ((byte || small || short_trunc || extended_word) &&
+                  (insn.Bits(24, 8) || (insn.words[3] & 0xc00001ffU) ||
+                   (opcode == 0xb05 &&
+-                   (insn.Bits(63, 1) || (!small && insn.Bits(62, 1)) ||
++                   ((!small && insn.Bits(63, 1)) || (!small && insn.Bits(62, 1)) ||
+                     (small && insn.Bits(59, 3)))) ||
+                   insn.Bits(91, 1) != static_cast<u32>(opcode == 0xd05))) ||
+                 (opcode != 0xb05 && (insn.words[1] & ~(half ? 0x100000ffU :
+                     0xffU | (absolute ? 0x40000000U : 0U) | (negate ? 0x80000000U : 0U)))) ||
+                 (opcode == 0xd05 && uniform_register(insn.Bits(32, 8)) == ~0U)) {
                  return fail(index, "native float-to-integer conversion mode");
              }
              const bool is_signed = insn.Bits(72, 1);
--            u32 source = opcode == 0xb05 ? materialize(2, 0, 252, false, false)
-+            // U16 constant sources use the ordinary float absolute/negate bits.
-+            // Apply them before NaN handling, saturation and rounding.
+-            u32 source = opcode == 0xb05 ? materialize(2, 0, 252, small && insn.Bits(62, 1), false)
 +            u32 source = opcode == 0xb05 ? materialize(2, 0, 252, small && insn.Bits(62, 1),
-+                                                       small && insn.Bits(63, 1))
++                                                              small && insn.Bits(63, 1))
                         : opcode == 0xd05 ? uniform_register(insn.Bits(32, 8)) : insn.Bits(32, 8);
              if (half) {
                  extract_half({source, insn.Bits(60, 1) ? 3U : 2U, false, false}, 0, 252);
