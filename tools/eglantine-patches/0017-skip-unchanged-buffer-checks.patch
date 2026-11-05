@@ -1,8 +1,7 @@
 diff --git a/src/common/range_sets.h b/src/common/range_sets.h
-index e5cb53b058..f76e3c4ced 100644
 --- a/src/common/range_sets.h
 +++ b/src/common/range_sets.h
-@@ -26,6 +26,15 @@ public:
+@@ -26,6 +26,15 @@
      void Clear();
      bool Empty() const;
  
@@ -18,7 +17,7 @@ index e5cb53b058..f76e3c4ced 100644
      /// Whether any range overlaps [base_address, base_address + size): one lookup.
      bool Intersects(AddressType base_address, size_t size) const;
  
-@@ -38,6 +47,7 @@ public:
+@@ -38,6 +47,7 @@
  private:
      struct RangeSetImpl;
      std::unique_ptr<RangeSetImpl> m_impl;
@@ -27,33 +26,26 @@ index e5cb53b058..f76e3c4ced 100644
  
  template <typename AddressType>
 diff --git a/src/common/range_sets.inc b/src/common/range_sets.inc
-index aeda7bc351..f514e69620 100644
 --- a/src/common/range_sets.inc
 +++ b/src/common/range_sets.inc
-@@ -193,11 +193,21 @@ template <typename AddressType>
- RangeSet<AddressType>::RangeSet(RangeSet&& other) {
-     m_impl = std::make_unique<RangeSet<AddressType>::RangeSetImpl>();
-     m_impl->m_ranges_set = std::move(other.m_impl->m_ranges_set);
-+    // A moved-from container is only "valid but unspecified", and callers keep adding to the
-+    // source after handing its ranges over (BufferCache::AccumulateFlushes).
-+    other.m_impl->m_ranges_set.clear();
+@@ -196,6 +196,7 @@
+     // A moved-from container is only "valid but unspecified". Callers hand ranges over by
+     // moving and then keep adding to the source (BufferCache::AccumulateFlushes).
+     other.m_impl->m_ranges_set.clear();
 +    ++other.m_removals;
  }
  
  template <typename AddressType>
- RangeSet<AddressType>& RangeSet<AddressType>::operator=(RangeSet&& other) {
--    m_impl->m_ranges_set = std::move(other.m_impl->m_ranges_set);
-+    if (this != &other) {
-+        m_impl->m_ranges_set = std::move(other.m_impl->m_ranges_set);
-+        other.m_impl->m_ranges_set.clear();
+@@ -203,6 +204,8 @@
+     if (this != &other) {
+         m_impl->m_ranges_set = std::move(other.m_impl->m_ranges_set);
+         other.m_impl->m_ranges_set.clear();
 +        ++m_removals;
 +        ++other.m_removals;
-+    }
-+    return *this;
+     }
+     return *this;
  }
- 
- template <typename AddressType>
-@@ -207,11 +217,13 @@ void RangeSet<AddressType>::Add(AddressType base_address, size_t size) {
+@@ -214,11 +217,13 @@
  
  template <typename AddressType>
  void RangeSet<AddressType>::Subtract(AddressType base_address, size_t size) {
@@ -67,11 +59,10 @@ index aeda7bc351..f514e69620 100644
      m_impl->m_ranges_set.clear();
  }
  
-@@ -220,6 +232,17 @@ bool RangeSet<AddressType>::Empty() const {
-     return m_impl->m_ranges_set.empty();
+@@ -228,6 +233,17 @@
  }
  
-+template <typename AddressType>
+ template <typename AddressType>
 +bool RangeSet<AddressType>::Contains(AddressType base_address, size_t size) const {
 +    const auto& set = m_impl->m_ranges_set;
 +    if (set.empty() || size == 0) {
@@ -82,14 +73,14 @@ index aeda7bc351..f514e69620 100644
 +    return it != set.end() && it->lower() <= base_address && it->upper() >= end_address;
 +}
 +
- template <typename AddressType>
++template <typename AddressType>
  bool RangeSet<AddressType>::Intersects(AddressType base_address, size_t size) const {
      const auto& set = m_impl->m_ranges_set;
+     if (set.empty() || size == 0) {
 diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
-index 00c82c52ad..40158ef2a5 100644
 --- a/src/video_core/buffer_cache/buffer_cache.h
 +++ b/src/video_core/buffer_cache/buffer_cache.h
-@@ -1013,7 +1013,17 @@ void BufferCache<P>::BindHostVertexBuffers() {
+@@ -1076,7 +1076,17 @@
              const Binding& binding = VertexBufferSlot(index);
              Buffer& buffer = slot_buffers[binding.buffer_id];
              TouchBuffer(buffer, binding.buffer_id);
@@ -108,17 +99,17 @@ index 00c82c52ad..40158ef2a5 100644
              if (!flags[Dirty::VertexBuffer0 + index]) {
                  flush_bindings();
                  continue;
-@@ -1766,7 +1776,8 @@ void BufferCache<P>::MarkWrittenBuffer(BufferId buffer_id, DAddr device_addr, u3
+@@ -1863,7 +1873,8 @@
      }
      memory_tracker.MarkRegionAsGpuModified(device_addr, size);
      MarkVertexBuffersStale(device_addr, size);
 -    gpu_modified_ranges.Add(device_addr, size);
 +    Nx2AddRangeOnce(gpu_modified_ranges, nx2_recent_gpu_ranges, nx2_recent_gpu_next, device_addr,
 +                    size);
-     if (DownloadsAtFence(device_addr, size)) {
-         uncommitted_gpu_modified_ranges.Add(device_addr, size);
-     } else {
-@@ -2108,6 +2119,9 @@ void BufferCache<P>::JoinOverlap(BufferId new_buffer_id, BufferId overlap_id,
+     QueueFenceDownload(device_addr, size);
+     if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
+         Tegra::Nx2MarkGpuWritten(device_addr, size);
+@@ -2218,6 +2229,9 @@
  template <class P>
  BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
                                        bool sparse_compatible) {
@@ -128,7 +119,7 @@ index 00c82c52ad..40158ef2a5 100644
      DAddr device_addr_end = Common::AlignUp(device_addr + wanted_size, CACHING_PAGESIZE);
      device_addr = Common::AlignDown(device_addr, CACHING_PAGESIZE);
      wanted_size = static_cast<u32>(device_addr_end - device_addr);
-@@ -2173,6 +2187,31 @@ void BufferCache<P>::TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept {
+@@ -2283,6 +2297,31 @@
  
  template <class P>
  bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size) {
@@ -160,7 +151,7 @@ index 00c82c52ad..40158ef2a5 100644
  #ifdef __ANDROID__
      const bool use_optimized_vertex_buffers = Settings::values.use_optimized_vertex_buffers.GetValue();
  #else
-@@ -2455,6 +2494,12 @@ void BufferCache<P>::DownloadBufferMemory(Buffer& buffer, DAddr device_addr, u64
+@@ -2575,6 +2614,12 @@
  
  template <class P>
  void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
@@ -174,13 +165,12 @@ index 00c82c52ad..40158ef2a5 100644
          runtime.OnBufferDeleted(slot_buffers[buffer_id]);
      }
 diff --git a/src/video_core/buffer_cache/buffer_cache_base.h b/src/video_core/buffer_cache/buffer_cache_base.h
-index ec442676d2..c3156ce901 100644
 --- a/src/video_core/buffer_cache/buffer_cache_base.h
 +++ b/src/video_core/buffer_cache/buffer_cache_base.h
-@@ -378,6 +378,64 @@ public:
+@@ -439,6 +439,64 @@
+     Common::SpinRecursiveMutex mutex;
      Runtime& runtime;
      bool any_buffer_uploaded = false;
- 
 +    /// EDEN_NX2_DRAW_TUNING=0 turns off the two per-draw shortcuts below.
 +    static bool Nx2DrawTuning() {
 +        static const bool enabled = [] {
@@ -239,10 +229,10 @@ index ec442676d2..c3156ce901 100644
 +        recent[next++ % recent.size()] = {device_addr, size, removals};
 +    }
 +
- private:
-     template <typename Func>
-     static void ForEachEnabledBit(u32 enabled_mask, Func&& func) {
-@@ -492,6 +550,7 @@ private:
+     /// Indirectly read banks of native programs already uploaded this frame.
+     std::unordered_set<DAddr> native_indirect_uniforms_this_frame;
+ 
+@@ -556,6 +614,7 @@
      void TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept;
  
      bool SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size);
@@ -251,10 +241,9 @@ index ec442676d2..c3156ce901 100644
      void UploadMemory(Buffer& buffer, u64 total_size_bytes, u64 largest_copy,
                        std::span<BufferCopy> copies);
 diff --git a/src/video_core/buffer_cache/memory_tracker_base.h b/src/video_core/buffer_cache/memory_tracker_base.h
-index 8936da023f..cf90e658e4 100644
 --- a/src/video_core/buffer_cache/memory_tracker_base.h
 +++ b/src/video_core/buffer_cache/memory_tracker_base.h
-@@ -70,6 +70,28 @@ public:
+@@ -70,6 +70,28 @@
          });
      }
  
@@ -284,10 +273,9 @@ index 8936da023f..cf90e658e4 100644
      void MarkRegionAsCpuModified(VAddr dirty_cpu_addr, u64 query_size) {
          IteratePages<true>(dirty_cpu_addr, query_size, [](Manager* manager, u64 offset, size_t size) {
 diff --git a/src/video_core/buffer_cache/word_manager.h b/src/video_core/buffer_cache/word_manager.h
-index 76d608bbe0..911e522a65 100644
 --- a/src/video_core/buffer_cache/word_manager.h
 +++ b/src/video_core/buffer_cache/word_manager.h
-@@ -51,6 +51,9 @@ struct WordManager {
+@@ -51,6 +51,9 @@
      }
      explicit WordManager() = default;
  
@@ -297,7 +285,7 @@ index 76d608bbe0..911e522a65 100644
      static u64 ExtractBits(u64 word, size_t page_start, size_t page_end) {
          constexpr size_t number_bits = sizeof(u64) * 8;
          const size_t limit_page_end = number_bits - (std::min)(page_end, number_bits);
-@@ -126,6 +129,8 @@ struct WordManager {
+@@ -126,6 +129,8 @@
              }
              if (enable) {
                  state_words[index] |= mask;
@@ -306,7 +294,7 @@ index 76d608bbe0..911e522a65 100644
                  if (type == Type::CPU || type == Type::CachedCPU)
                      untracked_words[index] |= mask;
                  if (type == Type::CPU)
-@@ -248,6 +253,7 @@ struct WordManager {
+@@ -248,6 +253,7 @@
          auto const untracked_words = Span(Type::Untracked);
          auto const cpu_words = Span(Type::CPU);
          std::vector<std::pair<VAddr, u64>> ranges;
