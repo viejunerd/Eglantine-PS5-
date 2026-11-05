@@ -21,7 +21,7 @@ if [[ $before == "$after" ]]; then
     echo "Eglantine is already at the newest commit ($(git -C Eglantine rev-parse --short HEAD))."
 else
     echo "Eglantine ${before:0:10} -> ${after:0:10}:"
-    git -C Eglantine log --oneline "$before..$after" | head -40
+    git -C Eglantine log --oneline --max-count=40 "$before..$after"
     echo "($(git -C Eglantine rev-list --count "$before..$after") commits, $(git -C Eglantine diff --shortstat "$before" "$after"))"
 fi
 # Put them back on the new commit: if one no longer applies, say so now.
