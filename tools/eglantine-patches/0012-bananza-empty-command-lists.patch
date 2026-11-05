@@ -1,63 +1,71 @@
 diff --git a/src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp b/src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp
-index 79586446d5..613a1014d4 100644
 --- a/src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp
 +++ b/src/core/hle/service/nvdrv/devices/nvhost_gpu.cpp
-@@ -5,6 +5,8 @@
+@@ -5,6 +5,7 @@
  // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
  // SPDX-License-Identifier: GPL-2.0-or-later
  
 +#include <algorithm>
-+#include <atomic>
- #include <cstdlib>
- #include <cstring>
- #include <vector>
-@@ -455,11 +457,30 @@ NvResult nvhost_gpu::SubmitGPFIFOImpl(IoctlSubmitGpfifo& params, Tegra::CommandL
+ #include <atomic>
+ #include <chrono>
+ #include <condition_variable>
+@@ -459,6 +460,10 @@
              }
              entries.submitted_words.resize(words);
              entries.submitted_offsets.reserve(entries.command_lists.size());
-+            // Donkey Kong Bananza submits startup lists before it writes them: a list that is all
-+            // zeros now gets an out-of-range offset, which makes the DMA pusher read it from
-+            // memory when it parses it.
++            // Bananza submits some all-zero startup pushbuffers before filling them.
++            // Read those entries at parse time, rather than from a submit-time snapshot.
 +            const bool defer_empty =
 +                system.GetApplicationProcessProgramID() == 0x040074a01bf12000ULL;
              size_t offset = 0;
-             for (const auto& entry : entries.command_lists) {
--                entries.submitted_offsets.push_back(static_cast<u32>(offset));
-                 channel_state->memory_manager->ReadBlockUnsafe(
-                     entry.addr, entries.submitted_words.data() + offset, entry.size * sizeof(u32));
-+                const auto first = entries.submitted_words.begin() + offset;
-+                const bool empty = defer_empty && std::all_of(first, first + entry.size,
-+                                                              [](const Tegra::CommandHeader& word) {
-+                                                                  return word.argument == 0;
-+                                                              });
-+                if (empty) {
-+                    static std::atomic<u32> reported{0};
-+                    if (reported.fetch_add(1, std::memory_order_relaxed) < 16) {
-+                        LOG_INFO(Service_NVDRV,
-+                                 "Command list at {:#x} ({} words) is empty when submitted: read "
-+                                 "it when it is parsed",
-+                                 static_cast<u64>(entry.addr), static_cast<u32>(entry.size));
+             for (u32 i = 0; i < entries.command_lists.size(); ++i) {
+                 const auto& entry = entries.command_lists[i];
+@@ -473,6 +478,22 @@
+                     channel_state->memory_manager->ReadBlockUnsafe(
+                         entry.addr, entries.submitted_words.data() + offset,
+                         entry.size * sizeof(u32));
++                    const auto first = entries.submitted_words.begin() + offset;
++                    const bool empty = defer_empty && entry.size != 0 &&
++                        std::all_of(first, first + entry.size, [](const Tegra::CommandHeader& word) {
++                            return word.argument == 0;
++                        });
++                    if (empty) {
++                        static std::atomic<u32> reported{0};
++                        if (reported.fetch_add(1, std::memory_order_relaxed) < 16) {
++                            LOG_INFO(Service_NVDRV,
++                                     "Command list at {:#x} ({} words) is empty when submitted: "
++                                     "read it when it is parsed",
++                                     static_cast<u64>(entry.addr), static_cast<u32>(entry.size));
++                        }
++                        // Keep pending-map entries on their existing deferred copy path.
++                        entries.submitted_offsets.back() = ~u32{};
 +                    }
-+                }
-+                entries.submitted_offsets.push_back(empty ? ~u32{} : static_cast<u32>(offset));
+                 }
                  offset += entry.size;
              }
-         }
 diff --git a/src/video_core/dma_pusher.cpp b/src/video_core/dma_pusher.cpp
-index 19319606bb..dca0aa0169 100644
 --- a/src/video_core/dma_pusher.cpp
 +++ b/src/video_core/dma_pusher.cpp
-@@ -189,6 +189,8 @@ bool DmaPusher::Step() {
-         // read: their words at submit time are an older frame's.
-         const bool submitted = command_resume_offset == 0 &&
-                                dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
-+                               command_list.submitted_offsets[dma_pushbuffer_subindex] <
-+                                   command_list.submitted_words.size() &&
-                                (command_list.snapshot_suspensions & 1) == 0 &&
-                                command_list.snapshot_suspensions ==
-                                    suspensions.load(std::memory_order_acquire) &&
-@@ -549,7 +551,7 @@ void DmaPusher::RefreshSnapshot(CommandList& list, u64 now) {
+@@ -197,6 +197,8 @@
+                                VideoCommon::CanUseSubmittedCommands(
+             command_resume_offset != 0,
+             dma_pushbuffer_subindex < command_list.submitted_offsets.size() &&
++                size_t{command_list.submitted_offsets[dma_pushbuffer_subindex]} + header.size <=
++                    command_list.submitted_words.size() &&
+                 !std::ranges::binary_search(command_list.deferred_entries,
+                                             static_cast<u32>(dma_pushbuffer_subindex)),
+             gpu_written,
+@@ -561,7 +563,7 @@
      for (size_t i = 0; i < list.command_lists.size() && i < list.submitted_offsets.size(); ++i) {
+         const CommandListHeader& entry = list.command_lists[i];
+         const u32 offset = list.submitted_offsets[i];
+-        if (offset + entry.size > list.submitted_words.size()) {
++        if (size_t{offset} + entry.size > list.submitted_words.size()) {
+             continue;
+         }
+         memory_manager.ReadBlockUnsafe(entry.addr, list.submitted_words.data() + offset,
+@@ -577,7 +579,7 @@
+         }
          const CommandListHeader& entry = list.command_lists[i];
          const u32 offset = list.submitted_offsets[i];
 -        if (offset + entry.size > list.submitted_words.size()) {
