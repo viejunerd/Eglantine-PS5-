@@ -12,3 +12,7 @@
   "compiler_rt_source": "https://github.com/llvm/llvm-project/tree/llvmorg-18.1.8/compiler-rt/lib/builtins",
   "compiler_rt_usage": "emutls.c and its four int_*.h headers. CMake changes only EMUTLS_SKIP_DESTRUCTOR_ROUNDS from 0 to 1 for libc++abi's pthread-key fallback; host uses the same helper with -femulated-tls. Cached input hashes are in CANDIDATE.json. cxa_thread_atexit.reference.cpp is inspected only."
 }
+{
+  "core_repo": "https://github.com/zortos293/Lichii",
+  "core_branch": "perf/oot-combined"
+}
