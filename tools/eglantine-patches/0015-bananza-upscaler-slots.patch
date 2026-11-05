@@ -1,32 +1,131 @@
 diff --git a/src/video_core/engines/kepler_compute.cpp b/src/video_core/engines/kepler_compute.cpp
-index 23ffbad790..a03b154971 100644
 --- a/src/video_core/engines/kepler_compute.cpp
 +++ b/src/video_core/engines/kepler_compute.cpp
-@@ -892,9 +892,13 @@ bool KeplerCompute::RememberDlssMotionVectors() {
- // TLD/SUST operands). Kirby Air Riders' reads a 2048x1152 image at cbuf0+0x80 and writes a
- // 2560x1440 one at +0x90; Fire Emblem: Fortune's Weave's DLSS network ends with a pass that reads
- // the input colour through cbuf0+0x328 and writes the DLSS output through cbuf0+0x348 (B10G11R11;
--// 720p to 1440p docked). Blit one to the other with bilinear filtering when both are plain 2D
--// images of the same format and the output is larger: title 4's slots first, then Fortune's
--// Weave's, else the first two handles in cbuf0+0x80..0x11c that form such a pair.
-+// 720p to 1440p docked). Donkey Kong Bananza's two networks read the frame through cbuf0+0x60 and
-+// write through +0x70 (B10G11R11, 1920x1080 or the dynamic resolution to 2880x1620); its 0x80+
-+// words hold stale handles that pair up into unrelated images (720x408 to 1440x810, 4x4 to
-+// 360x202), so its slots must win over the scan. Blit one to the other with bilinear filtering
-+// when both are plain 2D images of the same format and the output is larger: title 4's slots
-+// first, then Fortune's Weave's, then Donkey Kong Bananza's, else the first two handles in
-+// cbuf0+0x80..0x11c that form such a pair.
- bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
-     const auto& cbuf = launch_description.const_buffer_config[0];
-     const GPUVAddr cbuf_address = (GPUVAddr{cbuf.address_high} << 32) | cbuf.address_low;
-@@ -916,6 +920,10 @@ bool KeplerCompute::UpscaleInsteadOfNativeProgram() {
-         output = image(0x348);
-         fortunes_weave = upscale_pair(input, output);
+@@ -407,7 +407,9 @@
+                         VideoCommon::QueryPropertiesFlags::IsAFence, payload, 0);
+                 }
+                 return true;
+-            }, [&](const auto& descriptor) { return DispatchNativeCompute(descriptor); });
++            }, [&](const auto& descriptor) {
++                return DispatchNativeCompute(descriptor, system.GetApplicationProcessProgramID());
++            });
+         if (error.empty()) {
+             LOG_DEBUG(HW_GPU, "Native QMD control action={:#x}, QMD={:#x}", argument, qmd_address);
+             return true;
+@@ -524,7 +526,8 @@
      }
-+    if (!upscale_pair(input, output)) {
-+        input = image(0x60);
-+        output = image(0x70);
+ }
+ 
+-bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& qmd) {
++bool KeplerCompute::DispatchNativeCompute(const NativeQmdScheduler::Descriptor& qmd,
++                                          u64 program_id) {
+     launch_description = {};
+     launch_description.grid_dim_x.Assign(qmd[12]);
+     launch_description.grid_dim_y.Assign(qmd[13] & 0xffff);
+@@ -592,6 +595,12 @@
+             ++dlss_chain.rejected;
+         } else if (std::string_view{error.what()}.find("matrix multiply") !=
+                    std::string_view::npos) {
++            // The older generic upscale stand-in was removed upstream. Keep only the
++            // Bananza-specific known input/output slot pair, and only after a failed tensor
++            // program. This never affects Fire Emblem/Star Fox's newer DLSS path.
++            if (program_id == 0x040074a01bf12000ULL && TryBananzaUpscale()) {
++                return true;
++            }
+             DescribeNativeResources(qmd);
+             LOG_ERROR(HW_GPU, "Native tensor dispatch is unsupported; no validated replacement was available");
+         }
+@@ -1077,6 +1086,80 @@
+     return done;
+ }
+ 
++// Donkey Kong Bananza's rejected tensor upscaler consumes the image handle at cbuf0+0x60
++// and writes the larger image at +0x70. The old generic handle-scan stand-in was removed
++// upstream; use only this verified slot pair, without guessing from stale handles.
++bool KeplerCompute::TryBananzaUpscale() {
++    if (!(launch_description.const_buffer_enable_mask & 1)) {
++        return false;
 +    }
-     if (!upscale_pair(input, output)) {
-         input.reset();
-         output.reset();
++    const auto& cbuf = launch_description.const_buffer_config[0];
++    const GPUVAddr address = cbuf.Address();
++    if (cbuf.size.Value() < 0x74 ||
++        !memory_manager.IsFullyMappedRange(address, 0x74)) {
++        return false;
++    }
++    const auto image = [&](u32 offset) -> std::optional<Texture::TICEntry> {
++        const u32 handle = memory_manager.Read<u32>(address + offset);
++        if (handle == 0) {
++            return std::nullopt;
++        }
++        const u32 index = handle & 0xfffff;
++        const GPUVAddr tic = regs.tic.Address() + u64{index} * sizeof(Texture::TICEntry);
++        if (index > regs.tic.limit ||
++            !memory_manager.IsFullyMappedRange(tic, sizeof(Texture::TICEntry))) {
++            return std::nullopt;
++        }
++        return GetTICEntry(index);
++    };
++    const auto input = image(0x60);
++    const auto output = image(0x70);
++    if (!input || !output ||
++        input->format != Texture::TextureFormat::B10G11R11 ||
++        output->format != input->format ||
++        input->Address() == 0 || output->Address() == 0 ||
++        !input->IsBlockLinear() || !output->IsBlockLinear() ||
++        input->Width() == 0 || input->Height() == 0 ||
++        output->Width() <= input->Width() || output->Height() <= input->Height()) {
++        return false;
++    }
++    const auto surface = [](const Texture::TICEntry& tic) {
++        Fermi2D::Surface result{};
++        result.format = Tegra::RenderTargetFormat::B10G11R11_FLOAT;
++        result.linear = Fermi2D::MemoryLayout::BlockLinear;
++        result.block_width.Assign(tic.block_width);
++        result.block_height.Assign(tic.block_height);
++        result.block_depth.Assign(tic.block_depth);
++        result.depth = 1;
++        result.width = tic.Width();
++        result.height = tic.Height();
++        result.addr_upper = static_cast<u32>(tic.Address() >> 32);
++        result.addr_lower = static_cast<u32>(tic.Address());
++        return result;
++    };
++    const Fermi2D::Config config{
++        .operation = Fermi2D::Operation::SrcCopy,
++        .filter = Fermi2D::Filter::Bilinear,
++        .must_accelerate = true,
++        .dst_x0 = 0,
++        .dst_y0 = 0,
++        .dst_x1 = static_cast<s32>(output->Width()),
++        .dst_y1 = static_cast<s32>(output->Height()),
++        .src_x0 = 0,
++        .src_y0 = 0,
++        .src_x1 = static_cast<s32>(input->Width()),
++        .src_y1 = static_cast<s32>(input->Height()),
++    };
++    const bool done = rasterizer->AccelerateSurfaceCopy(surface(*input), surface(*output), config);
++    static u32 reported{};
++    if (reported++ < 8) {
++        LOG_INFO(HW_GPU, "Bananza tensor upscale stand-in: {}x{} -> {}x{}: {}",
++                 input->Width(), input->Height(), output->Width(), output->Height(),
++                 done ? "blitted" : "unavailable");
++    }
++    return done;
++}
++
+ void KeplerCompute::ProcessLaunch() {
+     const GPUVAddr launch_desc_loc = regs.launch_desc_loc.Address();
+     memory_manager.ReadBlockUnsafe(launch_desc_loc, &launch_description,
+diff --git a/src/video_core/engines/kepler_compute.h b/src/video_core/engines/kepler_compute.h
+--- a/src/video_core/engines/kepler_compute.h
++++ b/src/video_core/engines/kepler_compute.h
+@@ -268,7 +268,8 @@
+     std::unique_ptr<FrontState> front;
+     bool front_macros{}; ///< The front owns the macro code and bindings (the back skips them)
+ 
+-    bool DispatchNativeCompute(const NativeQmdScheduler::Descriptor& descriptor);
++    bool DispatchNativeCompute(const NativeQmdScheduler::Descriptor& descriptor, u64 program_id);
++    bool TryBananzaUpscale();
+     void ProcessNativeReportSemaphore(u32 argument);
+     void DescribeNativeResources(const NativeQmdScheduler::Descriptor& qmd);
+     void RememberDlssMotionVectors();
