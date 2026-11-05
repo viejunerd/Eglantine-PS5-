@@ -1,8 +1,7 @@
 diff --git a/src/shader_recompiler/CMakeLists.txt b/src/shader_recompiler/CMakeLists.txt
-index e4df9c045d..753c2bdc5d 100644
 --- a/src/shader_recompiler/CMakeLists.txt
 +++ b/src/shader_recompiler/CMakeLists.txt
-@@ -166,6 +166,7 @@ add_library(shader_recompiler STATIC
+@@ -169,6 +169,7 @@
      frontend/maxwell/translate/impl/video_set_predicate.cpp
      frontend/maxwell/translate/impl/vote.cpp
      frontend/maxwell/translate/impl/warp_shuffle.cpp
@@ -11,35 +10,31 @@ index e4df9c045d..753c2bdc5d 100644
      frontend/maxwell/translate/translate.h
      frontend/maxwell/translate_program.cpp
 diff --git a/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h b/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h
-index 16567b3188..325421bd0d 100644
 --- a/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h
 +++ b/src/shader_recompiler/frontend/ampere/lower_to_maxwell.h
-@@ -1499,6 +1499,20 @@ inline LoweredProgram LowerToMaxwellWith(std::span<const Instruction> code, u32
-                 }
-                 break;
-             }
-+            // Native lowering (default; EDEN_NX2_HMMA_NATIVE=0 keeps the Maxwell expansion below):
-+            // one HMMA_NATIVE pseudo-instruction whose translator builds the IR directly
-+            // (frontend/maxwell/translate/impl/hmma_native.cpp), 32 lane shuffles instead of 96
-+            // and no Maxwell temporaries. Same results, product order and f16 rounding.
+@@ -1778,6 +1778,18 @@
+                 dest % 2 || dest + 2 > limit || a % a_count || a + a_count > limit ||
+                 b % b_count || b + b_count > limit || (c != 255 && (c % 2 || c + 2 > limit)))
+                 return fail(index, "native half matrix multiply mode");
++            // Native HMMA IR lowering avoids the large Maxwell expansion. Keep the compact
++            // tensor and software paths below available with EDEN_NX2_HMMA_NATIVE=0.
 +            static const bool hmma_native = [] {
 +                const char* value = std::getenv("EDEN_NX2_HMMA_NATIVE");
 +                return value == nullptr || value[0] != '0';
 +            }();
 +            if (hmma_native && native_predicate == 7) {
-+                emit((0x5D38ULL << 48) | predicate | (u64{shape != 0} << 47) |
++                emit((0x5D38ULL << 48) | predicate | (u64{depth == 16} << 47) |
 +                     (static_cast<u64>(c) << 39) | (static_cast<u64>(b) << 20) |
 +                     (static_cast<u64>(a) << 8) | static_cast<u64>(dest));
 +                break;
 +            }
-             // The four f32 sums need more than the scratch registers: borrow four registers this
-             // instruction doesn't use, keeping their values in register bank 2 meanwhile.
-             std::array<bool, 256> used{};
+             if (compact_matrix) {
+                 // A software collective, not an NV cooperative-matrix operation. The backend
+                 // shares a bounded loop helper instead of duplicating hundreds of instructions
 diff --git a/src/shader_recompiler/frontend/maxwell/maxwell.inc b/src/shader_recompiler/frontend/maxwell/maxwell.inc
-index 5facfb4803..1e74e77e8d 100644
 --- a/src/shader_recompiler/frontend/maxwell/maxwell.inc
 +++ b/src/shader_recompiler/frontend/maxwell/maxwell.inc
-@@ -42,6 +42,7 @@ INST(HFMA2_reg,    "HFMA2 (reg)",    "0101 1101 0000 0---")
+@@ -43,6 +43,7 @@
  INST(HMUL2_reg,    "HMUL2 (reg)",    "0101 1101 0000 1---")
  INST(HSET2_reg,    "HSET2 (reg)",    "0101 1101 0001 1---")
  INST(HSETP2_reg,   "HSETP2 (reg)",   "0101 1101 0010 0---")
