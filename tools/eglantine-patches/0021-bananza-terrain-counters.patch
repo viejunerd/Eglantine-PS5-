@@ -68,18 +68,17 @@ index 0000000000..982fd7f6cf
 +
 +} // namespace Tegra
 diff --git a/src/video_core/engines/draw_manager.cpp b/src/video_core/engines/draw_manager.cpp
-index 564220b71c..73abbf068b 100644
 --- a/src/video_core/engines/draw_manager.cpp
 +++ b/src/video_core/engines/draw_manager.cpp
-@@ -10,6 +10,7 @@
+@@ -12,6 +12,7 @@
  #include "video_core/dirty_flags.h"
  #include "video_core/engines/maxwell_3d.h"
  #include "video_core/rasterizer_interface.h"
 +#include "video_core/macro.h"
+ #include "video_core/render_trace.h"
  
  namespace Tegra::Engines {
- 
-@@ -318,6 +319,9 @@ void Maxwell3D::DrawManager::ProcessDraw(Maxwell3D& maxwell3d, bool draw_indexed
+@@ -343,6 +344,9 @@
      LOG_TRACE(HW_GPU, "called, topology={}, count={}", draw_state.topology, draw_indexed ? draw_state.index_buffer.count : draw_state.vertex_buffer.count);
      UpdateTopology(maxwell3d);
      if (maxwell3d.ShouldExecute()) {
@@ -87,13 +86,20 @@ index 564220b71c..73abbf068b 100644
 +            maxwell3d.GetNativeMacroEngine().RecordBananzaTerrainDepthDraw(maxwell3d, instance_count);
 +        }
          maxwell3d.rasterizer->Draw(draw_indexed, instance_count);
-     }
- }
+     } else {
+         TraceSuppressedDraw(maxwell3d, false);
 diff --git a/src/video_core/macro.cpp b/src/video_core/macro.cpp
-index 94297e8fea..e18e6c5a7f 100644
 --- a/src/video_core/macro.cpp
 +++ b/src/video_core/macro.cpp
-@@ -26,6 +26,7 @@
+@@ -4,6 +4,7 @@
+ // SPDX-FileCopyrightText: Copyright 2020 yuzu Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <algorithm>
+ #include <array>
+ #include <cstdlib>
+ #include <unordered_set>
+@@ -26,6 +27,7 @@
  #include "common/fs/path_util.h"
  #include "common/settings.h"
  #include "common/container_hash.h"
@@ -101,7 +107,7 @@ index 94297e8fea..e18e6c5a7f 100644
  #include "video_core/engines/maxwell_3d.h"
  #include "video_core/engines/maxwell_3d.h"
  #include "video_core/dirty_flags.h"
-@@ -1343,11 +1344,87 @@ static void Dump(u64 hash, std::span<const u32> code, bool decompiled = false) {
+@@ -1345,11 +1347,87 @@
      macro_file.write(reinterpret_cast<const char*>(code.data()), code.size_bytes());
  }
  
@@ -190,7 +196,6 @@ index 94297e8fea..e18e6c5a7f 100644
          static std::unordered_set<std::uintptr_t> captured_contexts;
          static const bool capture = std::getenv("EDEN_NATIVE_FRAME_CAPTURE") != nullptr;
 diff --git a/src/video_core/macro.h b/src/video_core/macro.h
-index 0d574636e9..298a6def72 100644
 --- a/src/video_core/macro.h
 +++ b/src/video_core/macro.h
 @@ -7,6 +7,8 @@
@@ -202,7 +207,7 @@ index 0d574636e9..298a6def72 100644
  #include "video_core/macro_memo.h"
  #include "video_core/macro_turing.h"
  
-@@ -244,6 +246,7 @@ struct MacroEngine {
+@@ -244,6 +246,7 @@
      }
      // Compiles the macro if its not in the cache, and executes the compiled macro
      void Execute(Core::System& system, Engines::Maxwell3D& maxwell3d, u32 method, std::span<const u32> parameters);
@@ -210,7 +215,7 @@ index 0d574636e9..298a6def72 100644
      AnyCachedMacro Compile(Core::System& system, Engines::Maxwell3D& maxwell3d, std::span<const u32> code);
      struct CacheInfo {
          AnyCachedMacro program;
-@@ -265,6 +268,9 @@ struct MacroEngine {
+@@ -265,6 +268,9 @@
      std::shared_ptr<TuringMacroJit> native_jit;
      MacroMemoPairs native_writes;
      u64 native_calls{};
