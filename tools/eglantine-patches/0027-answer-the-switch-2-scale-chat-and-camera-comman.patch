@@ -1,29 +1,3 @@
-diff --git a/src/core/hle/service/am/service/graphics_scale_controller.h b/src/core/hle/service/am/service/graphics_scale_controller.h
-index b31858d3ed..14c3cb0604 100644
---- a/src/core/hle/service/am/service/graphics_scale_controller.h
-+++ b/src/core/hle/service/am/service/graphics_scale_controller.h
-@@ -19,6 +19,7 @@ public:
-         // clang-format off
-         static const FunctionInfo functions[] = {
-             {10, D<&IGraphicsScaleController::GetCurrentGraphicsScale>, "GetCurrentGraphicsScale"},
-+            {1050, D<&IGraphicsScaleController::SetGraphicsScaleChangedNotificationEnabled>, "SetGraphicsScaleChangedNotificationEnabled"},
-         };
-         // clang-format on
-         RegisterHandlers(functions);
-@@ -34,6 +35,13 @@ private:
-         *out_unknown2 = 0;
-         R_SUCCEED();
-     }
-+
-+    // nn::oe::SetGraphicsScaleChangedNotificationEnabled(bool): proxy slot 10, a u8 in and only a
-+    // result out. The scale never changes here, so there is no notification to enable.
-+    Result SetGraphicsScaleChangedNotificationEnabled(bool enabled) {
-+        LOG_DEBUG(Service_AM, "called, enabled={}", enabled);
-+        R_SUCCEED();
-+    }
- };
- 
- } // namespace Service::AM
 diff --git a/src/core/hle/service/friend/friend.cpp b/src/core/hle/service/friend/friend.cpp
 index bfb2d6b503..a45c8c3772 100644
 --- a/src/core/hle/service/friend/friend.cpp
@@ -157,7 +131,7 @@ diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
 index 261fb80a80..7ae65f0f77 100644
 --- a/src/core/hle/service/nx2_gsv.h
 +++ b/src/core/hle/service/nx2_gsv.h
-@@ -1506,7 +1506,10 @@ inline Nx2ImageLayout Nx2CalculateImageLayout(const u32* preference) {
+@@ -1519,7 +1519,10 @@ inline Nx2ImageLayout Nx2CalculateImageLayout(const u32* preference) {
  // GameChat's graphics side (nn::chat::gsv), handed out by gsv 1202. Read from the SDK's
  // nn::chat::gsv::Initialize: TIPC 1() returns a u32 id at word 3 (it aborts with 2162-0001 if
  // the id is over 0x3ff), then TIPC 11(u32 id) returns an event (copy handle at word 3, result at
@@ -169,7 +143,7 @@ index 261fb80a80..7ae65f0f77 100644
  class INx2ChatGsvSession final : public ServiceFramework<INx2ChatGsvSession> {
  public:
      explicit INx2ChatGsvSession(Core::System& system_)
-@@ -1514,6 +1517,8 @@ public:
+@@ -1527,6 +1530,8 @@ public:
          RegisterHandlersTipc({
              {1, &INx2ChatGsvSession::GetEventId, "GetEventId (guessed)"},
              {11, &INx2ChatGsvSession::GetEvent, "GetEvent (guessed)"},
@@ -178,7 +152,7 @@ index 261fb80a80..7ae65f0f77 100644
          });
      }
  
-@@ -1541,36 +1546,77 @@ private:
+@@ -1554,36 +1559,77 @@ private:
          rb.PushCopyObjects(ctx, event->GetReadableEvent());
      }
  
@@ -271,7 +245,7 @@ index 261fb80a80..7ae65f0f77 100644
  };
  
  // Video decoder output images (nn::codec image pools, gsv 991/911/961). The preference
-@@ -2976,6 +3022,9 @@ public:
+@@ -3264,6 +3310,9 @@ public:
              {991, &INx2GraphicsSystemSession::CalculateDecoderImagePoolBuffer,
               "CalculateDecoderImagePoolBuffer"},
              {901, &INx2GraphicsSystemSession::Stub, "VideoInitialize (guessed)"},
