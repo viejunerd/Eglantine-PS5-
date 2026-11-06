@@ -1178,23 +1178,39 @@ shader_costs = [
      '        }\n'
      '    }\n'
      '    return BuiltPipeline(current_pipeline);\n}'),
-    ('    if (!is_new) {\n        return pipeline.get();\n    }\n    pipeline = CreateComputePipeline(key, shader);\n    return pipeline.get();\n}',
-     '    if (is_new) {\n'
-     '        pipeline = CreateComputePipeline(key, shader);\n'
-     '    }\n'
-     '    if (::Eden::DevVulkan::trace_pipelines && pipeline) {\n'
-     '        static std::unordered_set<const void*> traced;\n'
-     '        if (traced.insert(pipeline.get()).second) {\n'
-     '            char text[160];\n'
-     '            std::snprintf(text, sizeof(text), "C%zu p=%p new=%d cs=%llx shared=%u wg=%u,%u,%u", traced.size(),\n'
-     '                          (const void*)pipeline.get(), int(is_new), (unsigned long long)key.unique_hash, unsigned(key.shared_memory_size),\n'
-     '                          unsigned(key.workgroup_size[0]), unsigned(key.workgroup_size[1]),\n'
-     '                          unsigned(key.workgroup_size[2]));\n'
-     '            ::Eden::Report("pipeline", text);\n'
-     '            LOG_INFO(Render_Vulkan, "EDEN_PIPELINE_FIRST_USE {}", text);\n'
-     '        }\n'
-     '    }\n'
-     '    return pipeline.get();\n}'),
+    # Lichii perf9 now retains compute compilation failures in ComputePipelineCacheEntry.
+    # Trace the valid pipeline only; keep entry.Get() so native shader failures still surface.
+    ('''    const auto [pair, is_new]{compute_cache.try_emplace(key)};
+    auto& entry{pair->second};
+    if (is_new) {
+        entry = CreateComputePipeline(key, shader);
+    }
+    return entry.Get(kepler_compute->IsNativeMode(),
+                     kepler_compute->regs.code_loc.Address() + qmd.program_start, key);
+}''',
+     '''    const auto [pair, is_new]{compute_cache.try_emplace(key)};
+    auto& entry{pair->second};
+    if (is_new) {
+        entry = CreateComputePipeline(key, shader);
+    }
+    if (::Eden::DevVulkan::trace_pipelines && entry.pipeline) {
+        static std::unordered_set<const void*> traced;
+        if (traced.insert(entry.pipeline.get()).second) {
+            char text[160];
+            std::snprintf(text, sizeof(text),
+                          "C%zu p=%p new=%d cs=%llx shared=%u wg=%u,%u,%u",
+                          traced.size(), (const void*)entry.pipeline.get(), int(is_new),
+                          (unsigned long long)key.unique_hash,
+                          unsigned(key.shared_memory_size),
+                          unsigned(key.workgroup_size[0]), unsigned(key.workgroup_size[1]),
+                          unsigned(key.workgroup_size[2]));
+            ::Eden::Report("pipeline", text);
+            LOG_INFO(Render_Vulkan, "EDEN_PIPELINE_FIRST_USE {}", text);
+        }
+    }
+    return entry.Get(kepler_compute->IsNativeMode(),
+                     kepler_compute->regs.code_loc.Address() + qmd.program_start, key);
+}'''),
     ('std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {',
      'std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline() {\n    auto timer = Eden::Performance::VulkanTimer(17);'),
     ('    const ComputePipelineCacheKey& key, const ShaderInfo* shader) {',
@@ -1247,11 +1263,6 @@ for old, new in shader_costs:
         old = old.replace('    return BuiltPipeline', mark_used + '    return BuiltPipeline')
         new = new.replace('    current_pipeline = pipeline.get();\n',
                           '    current_pipeline = pipeline.get();\n' + mark_used)
-    if 'Shader::TensorRejected' in old and 'Shader::TensorRejected' not in shader_source:
-        old = ('    if (!is_new) {\n        return pipeline.get();\n    }\n'
-               '    pipeline = CreateComputePipeline(key, shader);\n    return pipeline.get();\n}')
-        trace = new[new.index('    if (::Eden::DevVulkan::trace_pipelines && pipeline)'):]
-        new = ('    if (is_new) {\n        pipeline = CreateComputePipeline(key, shader);\n    }\n' + trace)
     if shader_source.count(old) != 1:
         raise RuntimeError(f'Shader pipeline anchor changed: {old[:60]}')
     shader_source = shader_source.replace(old, new)
