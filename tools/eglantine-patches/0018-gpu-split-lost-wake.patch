@@ -9,7 +9,7 @@ diff --git a/src/video_core/gpu_split.cpp b/src/video_core/gpu_split.cpp
  #include <cstdlib>
  #include <thread>
  
-@@ -128,7 +129,7 @@
+@@ -130,7 +131,7 @@
      }
      back_thread.request_stop();
      wake.fetch_add(1, std::memory_order_seq_cst);
@@ -18,11 +18,11 @@ diff --git a/src/video_core/gpu_split.cpp b/src/video_core/gpu_split.cpp
      back_thread.join();
      active = false;
      // The split is static and outlives the emulation session. The next session's back thread
-@@ -179,6 +180,11 @@
+@@ -182,6 +183,11 @@
              Pause();
          } else {
              std::this_thread::yield();
-+            // Retry the wake if the back thread is parked but has not consumed ring space.
++            // Retry the wake when the ring has no free space but the back appears parked.
 +            if ((spins & 1023) == 0 && back_waiting.load(std::memory_order_seq_cst)) {
 +                wake.fetch_add(1, std::memory_order_seq_cst);
 +                wake.notify_all();
@@ -30,41 +30,73 @@ diff --git a/src/video_core/gpu_split.cpp b/src/video_core/gpu_split.cpp
          }
      }
  }
-@@ -192,7 +198,8 @@
+@@ -195,7 +201,8 @@
      published.store(write_position, std::memory_order_seq_cst);
      if (back_waiting.load(std::memory_order_seq_cst)) {
          wake.fetch_add(1, std::memory_order_seq_cst);
 -        wake.notify_one();
-+        // notify_one can wake an unrelated waiter sharing libc++'s atomic wait bucket.
++        // Wake all matching atomic waiters, including on shared libc++ wait buckets.
 +        wake.notify_all();
      }
  }
  
-@@ -204,6 +211,7 @@
+@@ -207,6 +214,7 @@
      Publish();
      Nx2Profile::Scope scope{Nx2Profile::Zone::SplitDrain};
-     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Now() : 0;
+     const u64 start = Nx2Profile::Enabled() ? Nx2Profile::Ticks() : 0;
 +    auto next_report = std::chrono::steady_clock::now() + std::chrono::seconds{5};
      for (u32 spins = 0;; ++spins) {
          consumed_cache = consumed.load(std::memory_order_acquire);
          if (consumed_cache == write_position) {
-@@ -215,6 +223,19 @@
-             Pause();
-         } else {
-             std::this_thread::yield();
-+            // The back may be waiting even though it has work. Re-wake it periodically.
-+            if ((spins & 1023) == 0 && back_waiting.load(std::memory_order_seq_cst)) {
-+                wake.fetch_add(1, std::memory_order_seq_cst);
-+                wake.notify_all();
-+            }
-+            if ((spins & 1023) == 0 && std::chrono::steady_clock::now() >= next_report) {
-+                next_report += std::chrono::seconds{5};
-+                LOG_WARNING(HW_GPU,
-+                            "GPU split drain waiting on the back thread: {} of {} words consumed, "
-+                            "back {}",
-+                            consumed_cache, write_position,
-+                            back_waiting.load(std::memory_order_seq_cst) ? "parked" : "running");
-+            }
+@@ -214,6 +222,13 @@
+             Nx2Profile::AddDrain(site, start);
+             return;
          }
++        if ((spins & 1023) == 0 && std::chrono::steady_clock::now() >= next_report) {
++            next_report += std::chrono::seconds{5};
++            LOG_WARNING(HW_GPU,
++                        "GPU split drain waiting on back thread: {} of {} words consumed, back {}",
++                        consumed_cache, write_position,
++                        back_waiting.load(std::memory_order_seq_cst) ? "parked" : "running");
++        }
+         Backoff(spins, write_position);
      }
  }
+@@ -255,6 +270,16 @@
+         std::this_thread::yield();
+         return;
+     }
++    // A parked back may have missed a notification on a shared atomic wait bucket. Do not
++    // put the front to sleep behind it: periodically retry the wake until it resumes work.
++    if (back_waiting.load(std::memory_order_seq_cst)) {
++        if ((spins & 1023) == 0) {
++            wake.fetch_add(1, std::memory_order_seq_cst);
++            wake.notify_all();
++        }
++        std::this_thread::yield();
++        return;
++    }
+     // A long wait sleeps until the back stores a new position (port of #161's front_wake): the
+     // back checks front_waiting after each store, the front checks the position after setting it.
+     front_waiting.store(true, std::memory_order_seq_cst);
+diff --git a/src/video_core/gpu_split.h b/src/video_core/gpu_split.h
+--- a/src/video_core/gpu_split.h
++++ b/src/video_core/gpu_split.h
+@@ -89,7 +89,7 @@
+     void RequestIdleHook() {
+         hook_requested.store(true, std::memory_order_seq_cst);
+         wake.fetch_add(1, std::memory_order_seq_cst);
+-        wake.notify_one();
++        wake.notify_all();
+     }
+ 
+     /// Starts the back thread once the split is wanted (EDEN_NX2_SPLIT=1, a Switch 2 title,
+@@ -230,7 +230,7 @@
+     void NotifyFront() {
+         if (front_waiting.load(std::memory_order_seq_cst)) {
+             front_wake.fetch_add(1, std::memory_order_seq_cst);
+-            front_wake.notify_one();
++            front_wake.notify_all();
+         }
+     }
+ 
