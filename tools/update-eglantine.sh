@@ -31,6 +31,39 @@ if [[ -n $(git -C Eglantine status --porcelain --untracked-files=no) ]]; then
     fi
     echo "Backup saved in Eglantine's stash. Do not pop it onto the updated source."
 fi
+# Patch-created files are untracked in the Lichii submodule (for example
+# bananza_terrain_compat.h in 0021). If a later patch changed an earlier patch,
+# --revert cannot always remove them. The tracked-only stash above leaves them
+# in place, making "git apply --check" fail with "already exists".
+# Back up ONLY existing untracked files created by a patch, never all of the
+# user's other untracked source, build or cache files.
+shopt -s nullglob
+mapfile -t patch_created < <(
+    for patch in "$root"/tools/eglantine-patches/*.patch; do
+        git -C Eglantine apply --summary "$patch" |
+            sed -n 's/^ create mode [0-9][0-9]* //p'
+    done | sort -u
+)
+patch_leftovers=()
+for path in "${patch_created[@]}"; do
+    if [[ -e "Eglantine/$path" || -L "Eglantine/$path" ]] &&
+       [[ -z $(git -C Eglantine ls-files -- "$path") ]] &&
+       [[ -n $(git -C Eglantine ls-files --others --exclude-standard -- "$path") ]]; then
+        patch_leftovers+=("$path")
+    fi
+done
+if ((${#patch_leftovers[@]})); then
+    printf 'Backing up untracked patch-created file: %s\\n' "${patch_leftovers[@]}"
+    git -C Eglantine stash push --include-untracked \
+        -m "Automatic backup of patch-created files before nx2 update" -- "${patch_leftovers[@]}"
+    for path in "${patch_leftovers[@]}"; do
+        if [[ -e "Eglantine/$path" || -L "Eglantine/$path" ]]; then
+            echo "Cannot safely move $path out of the way; update aborted." >&2
+            exit 1
+        fi
+    done
+    echo "Patch-created file backup saved in Eglantine's stash. Do not pop onto the new core."
+fi
 before=$(git -C Eglantine rev-parse HEAD)
 git submodule update --remote Eglantine
 after=$(git -C Eglantine rev-parse HEAD)

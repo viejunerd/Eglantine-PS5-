@@ -61,6 +61,9 @@ for patch in "${patches[@]}"; do
         echo "Eglantine patch applied: $name"
     else
         echo "Eglantine patch does not apply: $name (Eglantine moved; make the patch again)" >&2
+        # Show the underlying git apply diagnostic (for example: patch-created file already exists)
+        # instead of hiding it behind a generic "anchor changed" message.
+        git -C Eglantine apply --check "$patch" >&2 || true
         exit 1
     fi
 done
