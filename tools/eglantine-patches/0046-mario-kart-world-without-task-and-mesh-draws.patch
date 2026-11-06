@@ -1,20 +1,27 @@
 diff --git a/src/video_core/renderer_vulkan/vk_rasterizer.cpp b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
-index bb8c7f57a3..5a7444bd23 100644
 --- a/src/video_core/renderer_vulkan/vk_rasterizer.cpp
 +++ b/src/video_core/renderer_vulkan/vk_rasterizer.cpp
-@@ -381,8 +381,13 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func) {
+@@ -443,13 +443,18 @@
+     static u32 no_mesh_check{};
      if (no_mesh_file && (no_mesh_check++ % 1024) == 0) {
          no_mesh = std::filesystem::exists(no_mesh_file);
      }
 -    if (mesh_draw && (no_mesh || !device.IsExtMeshShaderSupported())) {
 -        report_failure(no_mesh ? "EDEN_NX2_NO_MESH" : "no VK_EXT_mesh_shader");
-+    // Mario Kart World: these draws hang the PS5's GPU a few seconds into its map screen, and a run
-+    // without them reached the menu with nothing visibly missing.
+-        TraceRenderState(is_indexed, "mesh-skipped", nullptr);
+-        return;
+-    }
++    // Mario Kart World: mesh draws have caused a PS5 GPU hang shortly after entering the map.
++    // Until mesh support is reliable on that target, skip these draws for this game only.
 +    const bool no_mesh_title{Settings::GetCurrentProgramID() == 0x0400C3F00006E000ULL};
 +    if (mesh_draw && (no_mesh || no_mesh_title || !device.IsExtMeshShaderSupported())) {
 +        report_failure(no_mesh         ? "EDEN_NX2_NO_MESH"
 +                       : no_mesh_title ? "off for Mario Kart World"
 +                                       : "no VK_EXT_mesh_shader");
-         return;
-     }
++        TraceRenderState(is_indexed, "mesh-skipped", nullptr);
++        return;
++    }
      std::scoped_lock lock{buffer_cache.mutex, texture_cache.mutex};
+     // update engine as channel may be different.
+     pipeline->SetEngine(maxwell3d, gpu_memory);
+     const u32 repack_dirty = buffer_cache_runtime.SetVertexRepackLayout(
