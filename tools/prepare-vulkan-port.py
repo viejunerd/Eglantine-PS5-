@@ -8,9 +8,222 @@ report = '--report' in sys.argv
 source, output = map(Path, [a for a in sys.argv[1:] if a != '--report'])
 port = Path(__file__).resolve().parents[1] / 'headless'
 broken = []
+
+# Lichii nx2 moved several Vulkan functions while retaining their semantics. Rebase the
+# optional PS5 probes and compatibility work on those functions, without throwing away
+# native compute failure diagnostics, Vulkan tracing, or newer frame/sample bookkeeping.
+def recent_lichii_anchor(relative, text, old, new):
+    if text.count(old) == 1:
+        return old, new
+    if relative.endswith('/vk_rasterizer.cpp'):
+        if old.startswith('        scheduler.RequestOutsideRenderPassOperationContext();\n        scheduler.Record([pipeline, indirect_buffer'):
+            old = ('        scheduler.RequestOutsideRenderPassOperationContext();\n'
+                   '        scheduler.TraceComputePipeline(pipeline->ShaderHash());\n'
+                   '        scheduler.Record([this, pipeline, indirect_buffer = buffer->Handle(),')
+            new = ('        scheduler.RequestOutsideRenderPassOperationContext();\n'
+                   '        if (::Eden::DevVulkan::compute_barriers) {\n'
+                   '            scheduler.Record([](vk::CommandBuffer cmdbuf) {\n'
+                   '                cmdbuf.PipelineBarrier(vk::PIPELINE_STAGE_GRAPHICS_COMPUTE_TRANSFER,\n'
+                   '                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT,\n'
+                   '                    0, COMPUTE_INPUT_BARRIER);\n'
+                   '            });\n'
+                   '        }\n'
+                   '        scheduler.TraceComputePipeline(pipeline->ShaderHash());\n'
+                   '        scheduler.Record([this, pipeline, indirect_buffer = buffer->Handle(),')
+        elif old.startswith('        cmdbuf.Dispatch(dim[0], dim[1], dim[2]);'):
+            old = ('        scheduler.TraceGpuWork(cmdbuf, pipeline->ShaderHash(), 0, dim,\n'
+                   '                                [&] { cmdbuf.Dispatch(dim[0], dim[1], dim[2]); });')
+            new = old + ('\n        if (::Eden::DevVulkan::compute_barriers)\n'
+                         '            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,\n'
+                         '                                   COMPUTE_CONSUMER_STAGES, 0, COMPUTE_WRITE_BARRIER);')
+        elif old.startswith('#ifdef __ANDROID__\n    static constexpr u32 DRAWS_TO_DISPATCH'):
+            # The dispatch constants were replaced by SubmissionPolicy. Keep PS5's 512-draw
+            # native budget, respecting EDEN_NX2_FLUSH_DRAWS; the old CHECK_MASK is gone.
+            old = '        budget = configured_budget.value_or(default_native_budget);'
+            new = '        budget = configured_budget.value_or(512U);'
+        elif old.startswith('    if (Profile::Scope scope{Profile::Zone::Configure}; !pipeline->Configure(is_indexed))'):
+            old = old.replace('        return;\n', '        TraceRenderState(is_indexed, "configure-failed", nullptr);\n        return;\n')
+            new = new.replace('        return;\n', '        TraceRenderState(is_indexed, "configure-failed", nullptr);\n        return;\n')
+        elif old.startswith('    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64,'):
+            old = ('    query_cache.CounterEnable(VideoCommon::QueryType::ZPassPixelCount64, maxwell3d->regs.zpass_pixel_count_enable);\n'
+                   '    {\n'
+                   '        Profile::Scope scope{Profile::Zone::DrawRecord};\n'
+                   '        scheduler.TraceGraphicsPipeline(pipeline->ShaderHashes());\n'
+                   '        trace_draw_hashes = {pipeline->ShaderHashes()[1], pipeline->ShaderHashes()[5]};\n'
+                   '        draw_func();\n'
+                   '    }\n'
+                   '    submitted = true;\n')
+            new = old.replace('    {\n        Profile::Scope scope{Profile::Zone::DrawRecord};',
+                              '    ::Eden::Performance::Mark(::Eden::Performance::draw_state, phase);\n'
+                              '    {\n        Profile::Scope scope{Profile::Zone::DrawRecord};')
+            new = new.replace('    submitted = true;\n',
+                              '    ::Eden::Performance::Mark(::Eden::Performance::draw_record, phase);\n'
+                              '    submitted = true;\n')
+        elif old.startswith('template <typename Func>\nvoid RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func)'):
+            old = old.replace('Func&& draw_func)', 'Func&& draw_func, bool is_indirect)')
+            new = new.replace('Func&& draw_func)', 'Func&& draw_func, bool is_indirect)')
+    elif relative.endswith('/vk_query_cache.cpp'):
+        if old.startswith('bool QueryCacheRuntime::HostConditionalRenderingCompareValue('):
+            start = text.index('bool QueryCacheRuntime::HostConditionalRenderingCompareValue(')
+            end = text.index('\n\nbool QueryCacheRuntime::HostConditionalRenderingCompareValues(', start)
+            old = text[start:end]
+            helper = new[:new.index('bool QueryCacheRuntime::HostConditionalRenderingCompareValue(')]
+            anchor = '    HostConditionalRenderingCompareBCImpl(object_1.address, true, true);'
+            new = (helper + old.replace(
+                anchor,
+                '    if (::Eden::DevVulkan::hcr_mode == 2) {\n'
+                '        const bool handled = HostConditionalRenderingOnCpu(*this, *impl, object_1.address, 0);\n'
+                '        TraceConditionalRendering("cpu-zero", handled, object_1.address);\n'
+                '        return handled;\n'
+                '    }\n'
+                '    if (::Eden::DevVulkan::hcr_mode == 1 && qc_dirty) {\n'
+                '        ::Eden::Performance::CountCondition(19);\n'
+                '        EndHostConditionalRendering();\n'
+                '        TraceConditionalRendering("dirty-cpu-fallback", false, object_1.address);\n'
+                '        return false;\n'
+                '    }\n'
+                '    ::Eden::Performance::CountCondition(16);\n'
+                + anchor))
+        elif old.startswith('    if (!impl->device.IsExtConditionalRendering()) {\n        return false;'):
+            old = ('    if (!impl->device.IsExtConditionalRendering()) {\n'
+                   '        TraceConditionalRendering("extension-unavailable", false, object_1.address, object_2.address);\n'
+                   '        return false;\n'
+                   '    }\n\n    const auto check_in_bc = [&](DAddr address) {')
+            new = old.replace('    const auto check_in_bc = [&](DAddr address) {',
+                              '    if (::Eden::DevVulkan::hcr_mode == 2) {\n'
+                              '        const bool handled = HostConditionalRenderingOnCpu(\n'
+                              '            *this, *impl, object_1.address, equal_check ? 1 : 2);\n'
+                              '        TraceConditionalRendering("cpu-compare", handled, object_1.address, object_2.address);\n'
+                              '        return handled;\n'
+                              '    }\n\n'
+                              '    const auto check_in_bc = [&](DAddr address) {')
+        elif old.startswith('    if (!is_in_ac[0] && !is_in_ac[1])'):
+            old = ('    if (!is_in_ac[0] && !is_in_ac[1]) {\n'
+                   '        EndHostConditionalRendering();\n'
+                   '        TraceConditionalRendering("uncached", false, object_1.address, object_2.address);\n'
+                   '        return false;\n'
+                   '    }\n\n'
+                   '    if (!qc_dirty && !is_in_bc[0] && !is_in_bc[1]) {\n'
+                   '        EndHostConditionalRendering();\n'
+                   '        TraceConditionalRendering("guest-synchronized", false, object_1.address, object_2.address);\n'
+                   '        return false;\n'
+                   '    }\n')
+            new = old.replace('        EndHostConditionalRendering();',
+                              '        ::Eden::Performance::CountCondition(13);\n'
+                              '        EndHostConditionalRendering();')
+            new += ('    if (::Eden::DevVulkan::hcr_mode == 1 && qc_dirty) {\n'
+                    '        ::Eden::Performance::CountCondition(19);\n'
+                    '        EndHostConditionalRendering();\n'
+                    '        TraceConditionalRendering("dirty-cpu-fallback", false, object_1.address, object_2.address);\n'
+                    '        return false;\n'
+                    '    }\n')
+        elif old.startswith('            HostConditionalRenderingCompareValueImpl(*objects[j], equal_check);'):
+            old = ('            HostConditionalRenderingCompareValueImpl(*objects[j], equal_check);\n'
+                   '            TraceConditionalRendering(i == 0 ? "initial-zero" : "current-zero", true,\n'
+                   '                                      object_1.address, object_2.address);\n'
+                   '            return true;')
+            new = ('            ::Eden::Performance::CountCondition(15);\n' + old)
+        elif old.startswith('    if (!is_gpu_high) {\n        EndHostConditionalRendering();'):
+            old = ('    if (!is_gpu_high) {\n'
+                   '        EndHostConditionalRendering();\n'
+                   '        TraceConditionalRendering("accuracy-bypass", true, object_1.address, object_2.address);\n'
+                   '        return true;\n'
+                   '    }\n\n'
+                   '    if (!is_in_bc[0] && !is_in_bc[1]) {\n'
+                   '        EndHostConditionalRendering();\n'
+                   '        TraceConditionalRendering("query-cache-bypass", true, object_1.address, object_2.address);\n'
+                   '        return true;\n'
+                   '    }\n'
+                   '    HostConditionalRenderingCompareBCImpl(object_1.address, equal_check);')
+            new = old.replace('        EndHostConditionalRendering();',
+                              '        ::Eden::Performance::CountCondition(14);\n'
+                              '        EndHostConditionalRendering();')
+            new = new.replace('        return true;\n', '        return ::Eden::DevVulkan::hcr_mode != 1;\n')
+            new = new.replace('    HostConditionalRenderingCompareBCImpl(object_1.address, equal_check);',
+                              '    ::Eden::Performance::CountCondition(16);\n'
+                              '    HostConditionalRenderingCompareBCImpl(object_1.address, equal_check);')
+    elif relative.endswith('/vulkan_memory_allocator.cpp'):
+        if old == '            vmaCalculateStatistics(allocator, &statistics);':
+            old = '    vmaCalculateStatistics(allocator, &stats);'
+            # That call is now in LogMemoryStatistics, without the old probe_rows/result locals.
+            new = old + '\n    if (std::getenv("EDEN_VMA_SNAPSHOT")) EdenVmaSnapshot(allocator, 512);'
+        elif old.startswith('vk::Image MemoryAllocator::CreateUnbackedImage(const VkImageCreateInfo &ci) const {'):
+            old = old.replace(' &ci) const {', ' &ci, bool aliased) const {')
+            new = new.replace(' &ci) const {', ' &ci, bool aliased) const {')
+    elif relative.endswith('/vk_scheduler.cpp'):
+        if old == 'Scheduler::~Scheduler() = default;':
+            start = text.index('Scheduler::~Scheduler() {')
+            end = text.index('\n}\n\nu64 Scheduler::Flush(', start) + 2
+            old = text[start:end]
+            new = old[:-1] + ('    worker_thread.request_stop();\n'
+                               '    if (worker_thread.joinable()) worker_thread.join();\n'
+                               '    GpuTimeReset(device);\n}')
+        elif old.startswith('        .pInheritanceInfo = nullptr,\n    });\n}\n\nu64 Scheduler::SubmitExecution('):
+            old = ('        .pInheritanceInfo = nullptr,\n'
+                   '    });\n'
+                   '    if (trace_query_pool && !trace_gpu_failed) {')
+            new = ('        .pInheritanceInfo = nullptr,\n'
+                   '    });\n'
+                   '    GpuTimeBegin(device, current_upload_cmdbuf);\n'
+                   '    if (trace_query_pool && !trace_gpu_failed) {')
+        elif old.startswith('u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore)'):
+            old = ('u64 Scheduler::Flush(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,\n'
+                   '                     std::source_location location) {')
+            new = old + ('\n    GpuSubmitOriginScope origin{__builtin_return_address(0), false, true};')
+        elif old.startswith('void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore)'):
+            old = ('void Scheduler::Finish(VkSemaphore signal_semaphore, VkSemaphore wait_semaphore,\n'
+                   '                       std::source_location location) {')
+            new = old + ('\n    GpuSubmitOriginScope origin{__builtin_return_address(0), true, true};')
+        elif old.startswith('            vk::Check(result);\n            break;\n        }\n    });'):
+            old = ('            vk::Check(result);\n'
+                   '            break;\n'
+                   '        }\n'
+                   '        if (trace_frame_end != 0) {')
+            new = old.replace('        if (trace_frame_end != 0) {',
+                              '        GpuTimeCountOrigin(submit_origin);\n'
+                              '        GpuTimeCollect(device);\n'
+                              '        if (trace_frame_end != 0) {')
+    elif relative.endswith('/renderer_vulkan.cpp'):
+        if old.startswith('    RenderScreenshot(framebuffers);\n    Frame* frame'):
+            old = ('    RenderScreenshot(framebuffers);\n'
+                   '    const auto acquiring = trace ? std::chrono::steady_clock::now()\n'
+                   '                                  : std::chrono::steady_clock::time_point{};')
+            new = ('    RenderScreenshot(framebuffers);\n'
+                   '    if (::Eden::Display::SkipFrame()) {\n'
+                   '        gpu.RendererFrameEndNotify();\n'
+                   '        rasterizer.TickFrame();\n'
+                   '        return;\n'
+                   '    }\n'
+                   '    const auto acquiring = trace ? std::chrono::steady_clock::now()\n'
+                   '                                  : std::chrono::steady_clock::time_point{};')
+        elif old.startswith('    present_manager.Present(frame);\n#ifdef HAS_LSFG'):
+            old = ('    present_manager.Present(frame);\n'
+                   '    const auto presented = trace ? std::chrono::steady_clock::now()\n'
+                   '                                 : std::chrono::steady_clock::time_point{};\n'
+                   '#ifdef HAS_LSFG\n'
+                   '    scheduler.DispatchWork();\n'
+                   '#endif')
+            new = ('    present_manager.Present(frame);\n'
+                   '    Eden::CountPresentedFrame();\n'
+                   '    const auto presented = trace ? std::chrono::steady_clock::now()\n'
+                   '                                 : std::chrono::steady_clock::time_point{};\n'
+                   '    scheduler.DispatchWork();')
+    elif relative.endswith('/vk_graphics_pipeline.cpp'):
+        if old == '            std::unique_lock lock{build_mutex};':
+            old = '            build->Wait(!worker_only_build);'
+            new = ('            auto timer = Eden::Performance::VulkanTimer(16);\n'
+                   '            build->Wait(!worker_only_build);')
+        elif old.startswith('    if (IsBuilt() && !pipeline) {'):
+            old = '    if (IsBuilt() && (!pipeline || build->Failed())) {'
+            new = ('    // Render targets current, feedback loops checked.\n'
+                   '    ::Eden::Performance::Mark(::Eden::Performance::cfg_rt, since);\n'
+                   '    if (IsBuilt() && (!pipeline || build->Failed())) {')
+    return old, new
+
 def adapt(relative, destination, replacements):
     text = (source / relative).read_text()
     for old, new in replacements:
+        old, new = recent_lichii_anchor(relative, text, old, new)
         if relative.endswith('/vk_rasterizer.cpp') and old.endswith('// update engine as channel may be different.') and old not in text:
             marker = '// Donkey Kong Bananza\'s terrain:'
             if marker in text:
