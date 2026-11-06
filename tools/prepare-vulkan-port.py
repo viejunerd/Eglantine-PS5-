@@ -32,7 +32,7 @@ def recent_lichii_anchor(relative, text, old, new):
                    '        scheduler.Record([this, pipeline, indirect_buffer = buffer->Handle(),')
         elif old.startswith('        cmdbuf.Dispatch(dim[0], dim[1], dim[2]);'):
             old = ('        scheduler.TraceGpuWork(cmdbuf, pipeline->ShaderHash(), 0, dim,\n'
-                   '                                [&] { cmdbuf.Dispatch(dim[0], dim[1], dim[2]); });')
+                   '                               [&] { cmdbuf.Dispatch(dim[0], dim[1], dim[2]); });')
             new = old + ('\n        if (::Eden::DevVulkan::compute_barriers)\n'
                          '            cmdbuf.PipelineBarrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,\n'
                          '                                   COMPUTE_CONSUMER_STAGES, 0, COMPUTE_WRITE_BARRIER);')
@@ -187,7 +187,7 @@ def recent_lichii_anchor(relative, text, old, new):
         if old.startswith('    RenderScreenshot(framebuffers);\n    Frame* frame'):
             old = ('    RenderScreenshot(framebuffers);\n'
                    '    const auto acquiring = trace ? std::chrono::steady_clock::now()\n'
-                   '                                  : std::chrono::steady_clock::time_point{};')
+                   '                                 : std::chrono::steady_clock::time_point{};')
             new = ('    RenderScreenshot(framebuffers);\n'
                    '    if (::Eden::Display::SkipFrame()) {\n'
                    '        gpu.RendererFrameEndNotify();\n'
@@ -195,7 +195,7 @@ def recent_lichii_anchor(relative, text, old, new):
                    '        return;\n'
                    '    }\n'
                    '    const auto acquiring = trace ? std::chrono::steady_clock::now()\n'
-                   '                                  : std::chrono::steady_clock::time_point{};')
+                   '                                 : std::chrono::steady_clock::time_point{};')
         elif old.startswith('    present_manager.Present(frame);\n#ifdef HAS_LSFG'):
             old = ('    present_manager.Present(frame);\n'
                    '    const auto presented = trace ? std::chrono::steady_clock::now()\n'
