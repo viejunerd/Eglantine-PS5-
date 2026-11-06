@@ -53,7 +53,7 @@ for path in "${patch_created[@]}"; do
     fi
 done
 if ((${#patch_leftovers[@]})); then
-    printf 'Backing up untracked patch-created file: %s\\n' "${patch_leftovers[@]}"
+    printf 'Backing up untracked patch-created file: %s\n' "${patch_leftovers[@]}"
     git -C Eglantine stash push --include-untracked \
         -m "Automatic backup of patch-created files before nx2 update" -- "${patch_leftovers[@]}"
     for path in "${patch_leftovers[@]}"; do
