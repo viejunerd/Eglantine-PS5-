@@ -80,7 +80,7 @@ diff --git a/src/common/range_sets.inc b/src/common/range_sets.inc
 diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
 --- a/src/video_core/buffer_cache/buffer_cache.h
 +++ b/src/video_core/buffer_cache/buffer_cache.h
-@@ -1076,7 +1076,17 @@
+@@ -1186,7 +1186,17 @@
              const Binding& binding = VertexBufferSlot(index);
              Buffer& buffer = slot_buffers[binding.buffer_id];
              TouchBuffer(buffer, binding.buffer_id);
@@ -99,7 +99,7 @@ diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_
              if (!flags[Dirty::VertexBuffer0 + index]) {
                  flush_bindings();
                  continue;
-@@ -1863,7 +1873,8 @@
+@@ -1974,7 +1984,8 @@
      }
      memory_tracker.MarkRegionAsGpuModified(device_addr, size);
      MarkVertexBuffersStale(device_addr, size);
@@ -109,7 +109,7 @@ diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_
      QueueFenceDownload(device_addr, size);
      if (Tegra::g_nx2_ampere.load(std::memory_order_relaxed)) {
          Tegra::Nx2MarkGpuWritten(device_addr, size);
-@@ -2218,6 +2229,9 @@
+@@ -2329,6 +2340,9 @@
  template <class P>
  BufferId BufferCache<P>::CreateBuffer(DAddr device_addr, u32 wanted_size,
                                        bool sparse_compatible) {
@@ -119,7 +119,7 @@ diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_
      DAddr device_addr_end = Common::AlignUp(device_addr + wanted_size, CACHING_PAGESIZE);
      device_addr = Common::AlignDown(device_addr, CACHING_PAGESIZE);
      wanted_size = static_cast<u32>(device_addr_end - device_addr);
-@@ -2283,6 +2297,31 @@
+@@ -2394,6 +2408,31 @@
  
  template <class P>
  bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size) {
@@ -148,10 +148,10 @@ diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_
 +
 +template <class P>
 +bool BufferCache<P>::SynchronizeBufferPages(Buffer& buffer, DAddr device_addr, u32 size) {
- #ifdef __ANDROID__
-     const bool use_optimized_vertex_buffers = Settings::values.use_optimized_vertex_buffers.GetValue();
- #else
-@@ -2575,6 +2614,12 @@
+     // An upload over a clean word of the tracker (word_manager.h) finds and changes nothing:
+     // walk only the dirty ones. Verify walks every word and checks the clean words.
+     const bool skip_clean = !Nx2Perf::Verify();
+@@ -2704,6 +2743,12 @@
  
  template <class P>
  void BufferCache<P>::DeleteBuffer(BufferId buffer_id, bool do_not_mark) {
@@ -167,7 +167,7 @@ diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_
 diff --git a/src/video_core/buffer_cache/buffer_cache_base.h b/src/video_core/buffer_cache/buffer_cache_base.h
 --- a/src/video_core/buffer_cache/buffer_cache_base.h
 +++ b/src/video_core/buffer_cache/buffer_cache_base.h
-@@ -439,6 +439,64 @@
+@@ -441,6 +441,64 @@
      Common::SpinRecursiveMutex mutex;
      Runtime& runtime;
      bool any_buffer_uploaded = false;
@@ -232,7 +232,7 @@ diff --git a/src/video_core/buffer_cache/buffer_cache_base.h b/src/video_core/bu
      /// Indirectly read banks of native programs already uploaded this frame.
      std::unordered_set<DAddr> native_indirect_uniforms_this_frame;
  
-@@ -556,6 +614,7 @@
+@@ -558,6 +616,7 @@
      void TouchBuffer(Buffer& buffer, BufferId buffer_id) noexcept;
  
      bool SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 size);
@@ -275,7 +275,7 @@ diff --git a/src/video_core/buffer_cache/memory_tracker_base.h b/src/video_core/
 diff --git a/src/video_core/buffer_cache/word_manager.h b/src/video_core/buffer_cache/word_manager.h
 --- a/src/video_core/buffer_cache/word_manager.h
 +++ b/src/video_core/buffer_cache/word_manager.h
-@@ -51,6 +51,9 @@
+@@ -60,6 +60,9 @@
      }
      explicit WordManager() = default;
  
@@ -285,7 +285,7 @@ diff --git a/src/video_core/buffer_cache/word_manager.h b/src/video_core/buffer_
      static u64 ExtractBits(u64 word, size_t page_start, size_t page_end) {
          constexpr size_t number_bits = sizeof(u64) * 8;
          const size_t limit_page_end = number_bits - (std::min)(page_end, number_bits);
-@@ -126,6 +129,8 @@
+@@ -135,6 +138,8 @@
              }
              if (enable) {
                  state_words[index] |= mask;
@@ -294,10 +294,10 @@ diff --git a/src/video_core/buffer_cache/word_manager.h b/src/video_core/buffer_
                  if (type == Type::CPU || type == Type::CachedCPU)
                      untracked_words[index] |= mask;
                  if (type == Type::CPU)
-@@ -248,6 +253,7 @@
+@@ -262,6 +267,7 @@
          auto const untracked_words = Span(Type::Untracked);
          auto const cpu_words = Span(Type::CPU);
-         std::vector<std::pair<VAddr, u64>> ranges;
+         CollectedRanges ranges;
 +        ++cpu_epoch;
          for (u64 word_index = 0; word_index < num_words; ++word_index) {
              const u64 cached_bits = cached_words[word_index];
