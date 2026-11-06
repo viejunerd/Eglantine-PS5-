@@ -11,6 +11,18 @@ cd "$root"
 git submodule update --init Eglantine
 # The patches (tools/eglantine-patches) come out first, so the submodule moves from a clean tree.
 bash tools/apply-eglantine-patches.sh --revert
+# When several patches change the same source, reverting them one by one can leave some edits
+# behind. Save those edits inside Eglantine's own stash before checking out a newer core.
+# Do not discard the user's work with reset --hard or checkout --force.
+if [[ -n $(git -C Eglantine status --porcelain --untracked-files=no) ]]; then
+    echo "Eglantine still has tracked changes after patch reversal; backing them up in its stash."
+    git -C Eglantine stash push -m "Automatic backup of leftover Eglantine changes before nx2 update"
+    if [[ -n $(git -C Eglantine status --porcelain --untracked-files=no) ]]; then
+        echo "Eglantine is still modified after stashing; checkout aborted to protect changes." >&2
+        exit 1
+    fi
+    echo "Backup saved in Eglantine's stash. Do not pop it onto the updated source."
+fi
 before=$(git -C Eglantine rev-parse HEAD)
 git submodule update --remote Eglantine
 after=$(git -C Eglantine rev-parse HEAD)
