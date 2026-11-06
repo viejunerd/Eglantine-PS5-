@@ -8,7 +8,15 @@ set -euo pipefail
 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
-git submodule update --init Eglantine
+# Do not check out the recorded (possibly older) submodule commit before taking out patches.
+# That checkout rejects the tracked changes from the last run of apply-eglantine-patches.sh:
+# the rollback/stash below would never get a chance to protect them.
+# "git submodule init" registers the submodule without moving its working tree.
+git submodule init Eglantine
+if [[ ! -f Eglantine/.git && ! -d Eglantine/.git ]]; then
+    # First checkout only: nothing has been patched in this submodule yet.
+    git submodule update --init Eglantine
+fi
 # The patches (tools/eglantine-patches) come out first, so the submodule moves from a clean tree.
 bash tools/apply-eglantine-patches.sh --revert
 # When several patches change the same source, reverting them one by one can leave some edits
