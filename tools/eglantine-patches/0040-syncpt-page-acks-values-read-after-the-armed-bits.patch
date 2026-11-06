@@ -1,33 +1,33 @@
 diff --git a/src/core/hle/service/nx2_gsv.h b/src/core/hle/service/nx2_gsv.h
-index 2ddb7351b4..7f97d06668 100644
 --- a/src/core/hle/service/nx2_gsv.h
 +++ b/src/core/hle/service/nx2_gsv.h
-@@ -3340,28 +3340,68 @@ private:
+@@ -3581,16 +3581,37 @@
      // Answers every armed wait: the value page is current, so the client rechecks its threshold
      // and rearms if it still has to wait. Acknowledging without a value change costs the client a
      // wakeup per poll, which keeps waits whose syncpoint we never see from hanging.
-+    // The armed bits are read before the values, so every acknowledged refresh sees values at
-+    // least as new as the client's request. Read after the values, a refresh armed in between
-+    // (nn::gs::TryWaitNativeSync after a slot event fired) was answered with the old value: the
-+    // movie player's frame callback then found its fence unreached and aborted (2162-0001).
-+    // EDEN_NX2_SYNCPT_ACK_SNAPSHOT=0 restores the old order.
++    // Read armed bits and the summary before updating values: a refresh acknowledged by this
++    // poll must carry syncpoint values at least as new as the armed request. A request rearmed
++    // between reading values and armed bits could otherwise be acknowledged with stale values.
++    // EDEN_NX2_SYNCPT_ACK_SNAPSHOT=0 restores values-first order for comparison.
      void PollSyncpts() {
          if (m_syncpt_memory == nullptr) {
              return;
          }
--        UpdateSyncptValues();
+-        const u32 words = (m_syncpt_count + 63) / 64;
 +        static const bool snapshot = [] {
 +            const char* value = std::getenv("EDEN_NX2_SYNCPT_ACK_SNAPSHOT");
 +            return value == nullptr || value[0] != '0';
 +        }();
 +        const u32 words = (std::min)((m_syncpt_count + 63) / 64, 0x40U);
-+        std::array<u64, 0x40> rw_bits{};
-+        u64 rw_summary{};
+         std::array<u64, 0x40> armed{};
+-        for (u32 w = 0; w < words; ++w) {
+-            armed[w] = m_syncpt_memory->Read64(m_syncpt_rw + SyncptRwBitsOffset + w * 8);
++        u64 armed_summary{};
 +        const auto read_armed = [&] {
 +            for (u32 w = 0; w < words; ++w) {
-+                rw_bits[w] = m_syncpt_memory->Read64(m_syncpt_rw + SyncptRwBitsOffset + w * 8);
++                armed[w] = m_syncpt_memory->Read64(m_syncpt_rw + SyncptRwBitsOffset + w * 8);
 +            }
-+            rw_summary = m_syncpt_memory->Read64(m_syncpt_rw + SyncptRwSummaryOffset);
++            armed_summary = m_syncpt_memory->Read64(m_syncpt_rw + SyncptRwSummaryOffset);
 +            std::atomic_thread_fence(std::memory_order_seq_cst);
 +        };
 +        if (snapshot) {
@@ -38,30 +38,25 @@ index 2ddb7351b4..7f97d06668 100644
 +            UpdateSyncptValues();
 +            SyncptPollTestDelay();
 +            read_armed();
-+        }
+         }
+-        UpdateSyncptValues();
          bool acked = false;
--        const u32 words = (m_syncpt_count + 63) / 64;
          for (u32 w = 0; w < words; ++w) {
--            const u64 rw_bits = m_syncpt_memory->Read64(m_syncpt_rw + SyncptRwBitsOffset + w * 8);
              const u64 ro_address = m_syncpt_ro + SyncptRoBitsOffset + w * 8;
--            if (m_syncpt_memory->Read64(ro_address) != rw_bits) {
--                m_syncpt_memory->Write64(ro_address, rw_bits);
-+            const u64 ro_bits = m_syncpt_memory->Read64(ro_address);
-+            if (ro_bits != rw_bits[w]) {
-+                m_syncpt_memory->Write64(ro_address, rw_bits[w]);
+@@ -3599,13 +3620,27 @@
                  acked = true;
              }
          }
 -        m_syncpt_memory->Write64(m_syncpt_ro + SyncptRoSummaryOffset,
 -                                 m_syncpt_memory->Read64(m_syncpt_rw + SyncptRwSummaryOffset));
-+        m_syncpt_memory->Write64(m_syncpt_ro + SyncptRoSummaryOffset, rw_summary);
++        m_syncpt_memory->Write64(m_syncpt_ro + SyncptRoSummaryOffset, armed_summary);
          if (acked) {
              m_syncpt_events[1]->Signal(system.Kernel());
          }
      }
  
-+    // EDEN_NX2_SYNCPT_POLL_DELAY_US=<n> (test only): every 8th poll stalls n microseconds between
-+    // reading the armed bits and the values, as a preempted timer thread would.
++    // EDEN_NX2_SYNCPT_POLL_DELAY_US=<n> (test only): every eighth poll stalls for n microseconds
++    // between sampling the armed bits and values to exercise preempted timer-thread ordering.
 +    void SyncptPollTestDelay() {
 +        static const u32 delay = [] {
 +            const char* value = std::getenv("EDEN_NX2_SYNCPT_POLL_DELAY_US");
@@ -78,7 +73,7 @@ index 2ddb7351b4..7f97d06668 100644
      // nn::gsv::shim::CalculateRequirements(u64* size, u64* alignment, preference, u32): the 0x40-byte
      // InterModuleUserImagePreference (words 2..17) and a u32 (word 18). A block-linear preference
      // (MakeInterModuleBlockUserImagePreference) holds kind 2 at word 3, (width - 1) | (height - 1)
-@@ -3786,6 +3826,7 @@ private:
+@@ -4046,6 +4081,7 @@
      u64 m_syncpt_rw{};
      u64 m_syncpt_ro{};
      u32 m_syncpt_count{};
