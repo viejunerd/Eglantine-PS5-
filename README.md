@@ -38,6 +38,7 @@ Current core pin: **Eglantine `0ca2032`** (`nx2`, `build-219` + 35 commits, 2026
 | Item | State |
 |---|---|
 | Console tested | PS5 firmware **13.60**, jailbroken, launched with ShadowMountPlus; other users run it on **11.40** and **11.60**. |
+| v1.219.029 | Built from v1.219.028 (same core) with one fix: Ocarina of Time no longer asks for a 1 GiB buffer when Kokiri Forest loads, which closed the game there (issue #21). **Compiled, not yet tested on a console.** |
 | v1.219.028 | Built 2026-11-08 from v1.219.020 (same core) with one fix: memory given back to the system is reserved in one step (a race that crashed an experimental build). |
 | Memory and CPU experiments (builds 021-027, not released) | Swapping the game's memory to the SSD and mimalloc as the app heap did not help; drawing task and mesh shaders through compute did. Measurements and conclusions: [docs/MEMORY-CPU-EXPERIMENTS.md](docs/MEMORY-CPU-EXPERIMENTS.md). |
 | Donkey Kong Bananza (Switch 2, `.nup` with update 3.2.0 + DLC) | Runs on the current build (core `3081c8e`) with its update and DLC: **Docked, 1x resolution, 10-25 fps depending on the zone, about 15 in large open areas, 30 fps in cutscenes**. A new zone can show purple the first time it is entered; in one test the game's own "reset terrain" option cleared it. |
@@ -53,6 +54,11 @@ Current core pin: **Eglantine `0ca2032`** (`nx2`, `build-219` + 35 commits, 2026
 ### Known issue that is fixed here: "stuck at 98% on every launch after the first"
 
 On the console, the Vulkan driver hung a Switch 2 game when it started from the pipeline cache saved by an earlier run. This build neither loads nor saves that global cache (`tools/eglantine-patches/0010-…`); per-game caches still work. If you ever see a hang at 98%, delete `/data/eglantineps5/user/cache/shader/` and tell us (attach `eden_log.txt`).
+
+## Changes in v1.219.029
+
+- **Ocarina of Time closing as Kokiri Forest loads** (`tools/eglantine-patches/0082-…`): the log of issue #21 shows the session ending with `VK_ERROR_OUT_OF_DEVICE_MEMORY` while the pool still had a 322 MiB free block. The request that failed was a single buffer of 1,065,418,752 bytes, made while binding the storage buffers of one of the game's compute programs. The word after a storage buffer's pointer was taken as the buffer's size whenever it fitted inside the mapping; there it is most likely the float `1.0` (`0x3F800000`), not a size. A word above 256 MiB is now treated as not being a size, and the buffer is bound like a bare pointer (up to 8 MiB). When that happens the log says `Storage buffer size word … is not a size: bound as a bare pointer`.
+- Not tested on a console yet. The Kokiri Forest load still needs a lot of memory right after this point, so a console that was already short may stop later for that reason.
 
 ## Changes in v1.219.028
 
@@ -204,6 +210,7 @@ A game can have its own values: in its settings, **Performance** (see [Settings 
 | Punto | Estado |
 |---|---|
 | Probado en consola | PS5 con firmware **13.60**, con jailbreak y ShadowMountPlus; otros usuarios la usan en **11.40** y **11.60**. |
+| v1.219.029 | Compilada a partir de la v1.219.028 (mismo core) con un arreglo: Ocarina of Time ya no pide un búfer de 1 GiB al cargar el Bosque Kokiri, que era lo que cerraba el juego ahí (issue #21). **Compilada, aún sin probar en consola.** |
 | v1.219.028 | Compilada el 8-11-2026 a partir de la v1.219.020 (mismo core) con un arreglo: la memoria que se devuelve al sistema queda reservada en un solo paso (una carrera que cerraba una build experimental). |
 | Pruebas de memoria y CPU (builds 021-027, no publicadas) | Llevar la memoria del juego al SSD y mimalloc como heap de la app no ayudaron; dibujar los task y mesh shaders con compute sí. Mediciones y conclusiones (en inglés, con resumen en español): [docs/MEMORY-CPU-EXPERIMENTS.md](docs/MEMORY-CPU-EXPERIMENTS.md). |
 | Donkey Kong Bananza (Switch 2, `.nup` con update 3.2.0 + DLC) | Funciona con la build actual (core `3081c8e`) con su update y su DLC: **modo TV, resolución 1x, 10-25 fps según la zona, unos 15 en zonas abiertas grandes, 30 fps en cinemáticas**. Una zona nueva puede verse morada la primera vez que se entra; en una prueba, la opción del juego «resetear terreno» lo arregló. |
