@@ -1,0 +1,41 @@
+diff --git a/src/video_core/buffer_cache/buffer_cache.h b/src/video_core/buffer_cache/buffer_cache.h
+index a9cb4f7..610d141 100644
+--- a/src/video_core/buffer_cache/buffer_cache.h
++++ b/src/video_core/buffer_cache/buffer_cache.h
+@@ -2703,6 +2703,11 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
+         }
+     }
+     const Binding binding = [&]() -> Binding {
++        // A word past 256 MiB after the pointer is another parameter, not a size: Ocarina of Time's
++        // Kokiri Forest load has the float 1.0 (0x3F800000) there inside a mapping larger than
++        // that, and the 1 GiB buffer it asked for ended the session out of device memory.
++        constexpr u32 MaxStorageSizeWord = static_cast<u32>(256_MiB);
++        bool bare_pointer = native_pointer;
+         u32 size = [&]() {
+             const u32 memory_layout_size =
+                 static_cast<u32>(gpu_memory->GetMemoryLayoutSize(gpu_addr));
+@@ -2717,12 +2722,22 @@ Binding BufferCache<P>::StorageBufferBinding(GPUVAddr ssbo_addr, u32 cbuf_index,
+             const u32 packed_size = static_cast<u32>(next_qword);
+             const bool next_qword_is_size = static_cast<u32>(next_qword >> 32) == 0 &&
+                                             packed_size != 0 && packed_size <= memory_layout_size;
+-            if (next_qword_is_size) {
++            if (next_qword_is_size && packed_size <= MaxStorageSizeWord) {
+                 return packed_size;
+             }
++            if (next_qword_is_size) {
++                bare_pointer = true;
++                static std::atomic<u32> reports{};
++                if (reports.fetch_add(1, std::memory_order_relaxed) < 16) {
++                    LOG_WARNING(HW_GPU,
++                                "Storage buffer size word {:#x} at {:#x} is not a size: bound as a "
++                                "bare pointer",
++                                packed_size, ssbo_addr + 8);
++                }
++            }
+             return (std::min)(memory_layout_size, static_cast<u32>(8_MiB));
+         }();
+-        if (native_pointer && size != 0) {
++        if (bare_pointer && size != 0) {
+             // Stop where the mapping or its device range does: the binding is one device range, and
+             // a written one isn't split into separate ranges without sparse sources.
+             size = static_cast<u32>(gpu_memory->MaxContinuousRange(gpu_addr, size));
